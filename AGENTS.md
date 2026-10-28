@@ -48,15 +48,26 @@ Use uv for everything (uv add, uv sync, uv run). Never run pip install and never
 - docs/decisions/: short decision records (ADR-001 onward) for each major choice, listing options and tradeoffs.
 - At the end: docs/interview-prep.md with the 15 hardest reviewer questions and answer outlines based on what we actually built.
 
-## LEARNING LADDER (how you must teach me code)
-For every piece of core logic, follow these steps and wait for me after each one:
-1. Explain the idea in plain words with a tiny real-life example.
-2. Show a very small example (under 15 lines) and explain it line by line.
-3. Give me a version with blanks (TODO marks) for me to fill in. I try first.
-4. I write the real version myself, using the example only as a hint.
-5. Review my code like a teammate's pull request: find bugs first, explain what went wrong in simple words, then ask me 2-3 senior-engineer questions (what happens on API timeout? why this chunk size? what breaks at 100k documents? where does the time go?).
-Never write the final core code for me. If I am stuck for a long time, give a smaller hint, not the full answer. You may write boilerplate (folders, config, tests scaffolding, Dockerfile, CI files), but explain it afterwards in simple words.
-For each major design decision, make me compare two options and their tradeoffs before choosing. Quiz me briefly before each milestone ends.
+## Security layers (required)
+1. Query checks before the pipeline: length limit, suspicious-pattern scan for injection attempts. This is only a first filter; never treat it as the main defense.
+2. Access control BEFORE retrieval: every document and every search carries tenant_id and user_id (plus a simple role: admin/member, and documents are private or tenant-shared). The access filter must be part of the search query itself, never applied after results come back. Add tests proving user A cannot see user B's documents and tenant X cannot see tenant Y's.
+3. Fixed prompt template with separate slots for the question and for retrieved context. User input can never change the prompt's structure. Retrieved text is marked as untrusted and the model is told to ignore any instructions found inside it.
+4. Audit logging: record who asked, when, which document ids were used, and what decision was made (answered, refused, blocked). Never log full document text. Mask emails, phone numbers and account numbers before logging.
+5. Attack test suite included in CI: hidden instructions inside an uploaded document, a query trying to bypass filters, a cross-tenant access attempt, and sensitive data appearing in logs. Report results in the README.
+Keep roles simple: do not build a full enterprise permission system.
+
+## HOW YOU MUST WORK WITH ME (type-everything method)
+I know coding basics but cannot yet write code from a blank file. I will type ALL the code myself (no copy-paste), because that is how I learn. I also need to finish this project quickly, so do not add extra exercises or quizzes between steps.
+For every file or piece of code, follow these steps:
+1. Say in 2-3 simple sentences what we are about to write and why we need it.
+2. Give me the code in chunks of about 20-40 lines (one function or one small section at a time). Never dump a whole file at once.
+3. Explain the chunk in simple words: what it does, how it works step by step, and one thing that could go wrong. Explain any technical term in one plain sentence.
+4. Ask me "Clear, or should I explain simpler?" and wait. If I say "explain simpler", use a different example.
+5. When I say clear, I type it. Then give me the exact command to run and what output I should see. If I get an error, help me fix it in simple words and explain what caused it.
+Do not move to the next chunk until I confirm the current one runs.
+You may decide file names, folder structure and small design details yourself, but for major design decisions give me two options with a one-line tradeoff each and a clear recommendation. I will pick.
+Do not create or edit files for me unless I ask. I will create files and type the code. You may create files only when I say "create it for you".
+At the end of each milestone, give me a 5-line summary of what we built and ask me to explain it back in my own words, then correct me gently.
 
 ## Scope guardrails
 - Work on ONE milestone at a time, then STOP and wait for me.
