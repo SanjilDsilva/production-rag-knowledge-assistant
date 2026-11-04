@@ -1,13 +1,14 @@
 from pathlib import Path
 import logging
+import hashlib
 
-import pandas as pd
 from pypdf import PdfReader
 
 from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from dataclasses import dataclass
+from zipfile import BadZipFile, ZipFile
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,62 @@ def clean_text(text: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def validate_pdf_signature(path: Path) -> None:
+    with path.open("rb") as file:
+        header = file.read(5)
+
+    if header != b"%PDF-":
+        raise ValueError("The file contents do not match the PDF extension")
+
+
+def validate_docx_signature(path: Path) -> None:
+    try:
+        with ZipFile(path) as word_file:
+            parts = word_file.namelist()
+    except BadZipFile as error:
+        raise ValueError("The file contents do not match the DOCX extension") from error
+
+    if "[Content_Types].xml" not in parts or "word/document.xml" not in parts:
+        raise ValueError("The file contents do not match the DOCX extension")
+
+
+def validate_text_contents(path: Path) -> None:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("Text file is not valid UTF-8") from error
+
+    if "\x00" in content:
+        raise ValueError("Text file contains binary data")
+
+
+def validate_upload_content(path: Path) -> None:
+    extension = path.suffix.casefold()
+
+    if extension == ".pdf":
+        validate_pdf_signature(path)
+    elif extension == ".docx":
+        validate_docx_signature(path)
+    elif extension in {".txt", ".csv"}:
+        validate_text_contents(path)
+
+    else:
+        raise ValueError(f"Unsupported file type: {extension}")
+
+
+def hash_file_bytes(path: Path) -> str:
+    file_hash = hashlib.sha256()
+
+    with path.open("rb") as file:
+        while True:
+            data = file.read(1024 * 1024)
+            if not data:
+                break
+            file_hash.update(data)
+
+    return file_hash.hexdigest()
+
+
 def load_text_file(path: Path) -> list[LoadedBlock]:
     text = clean_text(path.read_text(encoding="utf-8"))
     if not text:
@@ -33,6 +90,8 @@ def load_text_file(path: Path) -> list[LoadedBlock]:
 
 
 def load_csv_file(path: Path) -> list[LoadedBlock]:
+    import pandas as pd
+
     frame = pd.read_csv(
         path,
         dtype=str,

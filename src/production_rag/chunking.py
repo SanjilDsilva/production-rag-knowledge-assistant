@@ -1,11 +1,18 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-import re
-from production_rag.ingestion import LoadedBlock
-import hashlib
+
+if TYPE_CHECKING:
+    from production_rag.ingestion import LoadedBlock
+
 
 @dataclass
 class Chunk:
@@ -18,7 +25,6 @@ class Chunk:
     user_id: str
     location: str
     content_hash: str
-   
 
 
 BGE_MODEL_NAME = "BAAI/bge-small-en-v1.5"
@@ -170,7 +176,6 @@ def build_chunk_texts(
     packed = []
     pending = []
 
-
     def flush_pending() -> None:
         if pending:
             packed.extend(
@@ -184,7 +189,9 @@ def build_chunk_texts(
 
         if block.block_type in {"csv_row", "table"}:
             flush_pending()
-            rows = block.text.splitlines() if block.block_type == "table" else [block.text]
+            rows = (
+                block.text.splitlines() if block.block_type == "table" else [block.text]
+            )
             row_pieces = []
 
             for row in rows:
@@ -199,10 +206,11 @@ def build_chunk_texts(
                 flush_pending()
 
             pieces = split_oversized_text(block.text, tokenizer, max_tokens)
-            pending.extend((piece, block.location) for piece  in pieces)
+            pending.extend((piece, block.location) for piece in pieces)
 
     flush_pending()
     return packed
+
 
 def chunk_blocks(
     blocks: list[LoadedBlock],
@@ -222,22 +230,21 @@ def chunk_blocks(
     if max_tokens > tokenizer.model_max_length:
         raise ValueError("max_tokens exceeds the tokenizer's model limit")
 
-    text_locations = build_chunk_texts(
-        blocks, tokenizer, max_tokens, overlap_tokens
-    )
+    text_locations = build_chunk_texts(blocks, tokenizer, max_tokens, overlap_tokens)
     chunks = []
-    chunker_version = (
-        f"{CHUNKER_VERSION}-size-{max_tokens}-overlap-{overlap_tokens}"
-    )
+    chunker_version = f"{CHUNKER_VERSION}-size-{max_tokens}-overlap-{overlap_tokens}"
 
     for text, location in text_locations:
         if count_tokens(text, tokenizer) < MIN_CHUNK_TOKENS:
             continue
 
         position = len(chunks)
-        chunk_id = hashlib.sha256(
-            f"{document_id}: {position}".encode("utf-8")
-        ).hexdigest()
+        identity = json.dumps(
+            [tenant_id, user_id, document_id, position],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        chunk_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         chunks.append(

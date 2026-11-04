@@ -123,3 +123,34 @@ def test_csv_rows_remain_separate():
 
     assert len(chunks) == 2
     assert [location for _, location in chunks] == ["row 2", "row 3"]
+
+
+def test_same_text_in_different_tenants_gets_different_chunk_ids():
+    tokenizer = SimpleTokenizer()
+    blocks = [
+        LoadedBlock(
+            text="Ada builds reliable software for her engineering team.",
+            location="paragraph 1",
+            block_type="paragraph",
+        )
+    ]
+
+    tenant_a_chunks = chunk_blocks(
+        blocks,
+        document_id="same-document",
+        tenant_id="tenant-a",
+        user_id="same-user",
+        tokenizer=tokenizer,
+    )
+    tenant_b_chunks = chunk_blocks(
+        blocks,
+        document_id="same-document",
+        tenant_id="tenant-b",
+        user_id="same-user",
+        tokenizer=tokenizer,
+    )
+
+    assert len(tenant_a_chunks) == 1
+    assert len(tenant_b_chunks) == 1
+    assert tenant_a_chunks[0].content_hash == tenant_b_chunks[0].content_hash
+    assert tenant_a_chunks[0].chunk_id != tenant_b_chunks[0].chunk_id

@@ -1,8 +1,23 @@
 from production_rag import vector_store
 from qdrant_client import QdrantClient, models
+from uuid import UUID
+import pytest
+from dataclasses import replace
+from production_rag.chunking import Chunk
 
 
-def test_search_returns_only_requesting_tenant_and_user(tmp_path):
+@pytest.mark.parametrize("search_mode", ["dense", "keyword", "hybrid"])
+@pytest.mark.parametrize(
+    ("tenant_id", "user_id", "expected_document_id"),
+    [
+        ("tenant-a", "user-a", "doc-a"),
+        ("tenant-a", "user-b", "doc-b"),
+        ("tenant-b", "user-a", "doc-c"),
+    ],
+)
+def test_search_returns_only_requesting_tenant_and_user(
+    tmp_path, search_mode, tenant_id, user_id, expected_document_id
+):
     client = QdrantClient(path=str(tmp_path / "qdrant"))
     try:
         vector_store.create_collection(client)
@@ -48,14 +63,206 @@ def test_search_returns_only_requesting_tenant_and_user(tmp_path):
             client=client,
             query_text="quarterly budget",
             query_vector=dense_vector,
-            tenant_id="tenant-a",
-            user_id="user-a",
+            tenant_id=tenant_id,
+            user_id=user_id,
             limit=10,
+            search_mode=search_mode,
         )
 
-        returned_document_ids = {
-            result.payload["document_id"] for result in results
+        returned_document_ids = {result.payload["document_id"] for result in results}
+        assert returned_document_ids == {expected_document_id}
+    finally:
+        client.close()
+
+
+def test_qdrant_point_id_is_stable_and_differs_for_different_chunk_ids():
+    chunk_id_a = "a" * 64
+    chunk_id_b = "b" * 64
+
+    first_id = vector_store.point_id_for_chunk_id(chunk_id_a)
+    repeated_id = vector_store.point_id_for_chunk_id(chunk_id_a)
+    second_id = vector_store.point_id_for_chunk_id(chunk_id_b)
+
+    assert first_id == repeated_id
+    assert first_id != second_id
+    UUID(first_id)
+    UUID(second_id)
+
+
+def test_same_text_from_two_tenants_is_stored_as_two_qdrant_points(tmp_path):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        tenant_a_chunk = Chunk(
+            chunk_id="a" * 64,
+            document_id="same-document",
+            position=0,
+            text="The same useful text belongs to both tenants.",
+            chunker_version="recursive-v1",
+            tenant_id="tenant-a",
+            user_id="same-user",
+            location="page 1",
+            content_hash="c" * 64,
+        )
+        tenant_b_chunk = replace(
+            tenant_a_chunk,
+            chunk_id="b" * 64,
+            tenant_id="tenant-b",
+        )
+        dense_vector = [1.0] + [0.0] * 383
+
+        vector_store.upsert_chunks(
+            client,
+            [tenant_a_chunk, tenant_b_chunk],
+            [dense_vector, dense_vector],
+            filename="shared.txt",
+            file_hash="f" * 64,
+        )
+
+        vector_store.upsert_chunks(
+            client,
+            [tenant_a_chunk, tenant_b_chunk],
+            [dense_vector, dense_vector],
+            filename="shared.txt",
+            file_hash="f" * 64,
+        )
+
+        points, _ = client.scroll(
+            collection_name=vector_store.COLLECTION_NAME,
+            limit=10,
+            with_payload=True,
+        )
+        assert {point.payload["filename"] for point in points} == {"shared.txt"}
+        assert {point.payload["file_hash"] for point in points} == {"f" * 64}
+        assert len(points) == 2
+        assert {point.payload["tenant_id"] for point in points} == {
+            "tenant-a",
+            "tenant-b",
         }
-        assert returned_document_ids == {"doc-a"}
+        assert {point.payload["chunk_id"] for point in points} == {
+            tenant_a_chunk.chunk_id,
+            tenant_b_chunk.chunk_id,
+        }
+    finally:
+        client.close()
+
+
+def test_file_hash_lookup_is_scoped_to_tenant_and_user(tmp_path):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        dense_vector = [1.0] + [0.0] * 383
+        file_hash = "f" * 64
+        owners = [
+            (1, "tenant-a", "user-a", "doc-a"),
+            (2, "tenant-a", "user-b", "doc-b"),
+            (3, "tenant-b", "user-a", "doc-c"),
+        ]
+        points = []
+
+        for point_id, tenant_id, user_id, document_id in owners:
+            points.append(
+                models.PointStruct(
+                    id=point_id,
+                    vector={vector_store.DENSE_VECTOR_NAME: dense_vector},
+                    payload={
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                        "document_id": document_id,
+                        "file_hash": file_hash,
+                        "filename_key": "shared.txt",
+                    },
+                )
+            )
+
+        client.upsert(
+            collection_name=vector_store.COLLECTION_NAME,
+            points=points,
+        )
+
+        assert (
+            vector_store.find_document_by_file_hash(
+                client, "tenant-a", "user-a", file_hash
+            )
+            == "doc-a"
+        )
+        assert (
+            vector_store.find_document_by_file_hash(
+                client, "tenant-a", "user-b", file_hash
+            )
+            == "doc-b"
+        )
+        assert (
+            vector_store.find_document_by_file_hash(
+                client, "tenant-b", "user-a", file_hash
+            )
+            == "doc-c"
+        )
+        assert (
+            vector_store.find_document_by_file_hash(
+                client, "tenant-b", "user-b", file_hash
+            )
+            is None
+        )
+        assert (
+            vector_store.find_document_by_filename(
+                client, "tenant-a", "user-a", "shared.txt"
+            )
+            == "doc-a"
+        )
+        assert (
+            vector_store.find_document_by_filename(
+                client, "tenant-a", "user-b", "shared.txt"
+            )
+            == "doc-b"
+        )
+
+        vector_store.delete_document_chunks(client, "tenant-a", "user-a", "doc-a")
+        remaining_points, _ = client.scroll(
+            collection_name=vector_store.COLLECTION_NAME,
+            limit=10,
+            with_payload=True,
+        )
+        assert {point.payload["document_id"] for point in remaining_points} == {
+            "doc-b",
+            "doc-c",
+        }
+    finally:
+        client.close()
+
+
+def test_upload_upsert_marks_source_as_user_upload(tmp_path):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        chunk = Chunk(
+            chunk_id="a" * 64,
+            document_id="nist-upload",
+            position=0,
+            text="A user-uploaded NIST excerpt.",
+            chunker_version="recursive-v1",
+            tenant_id="benchmark-tenant",
+            user_id="benchmark-user",
+            location="page 1",
+            content_hash="b" * 64,
+        )
+        dense_vector = [1.0] + [0.0] * 383
+
+        vector_store.upsert_chunks(
+            client,
+            [chunk],
+            [dense_vector],
+            filename="nist.pdf",
+            file_hash="c" * 64,
+        )
+        points, _ = client.scroll(
+            collection_name=vector_store.COLLECTION_NAME,
+            limit=10,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        assert len(points) == 1
+        assert points[0].payload["source"] == "user_upload"
     finally:
         client.close()

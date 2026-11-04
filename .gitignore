@@ -7,3 +7,8 @@ __pycache__/
 .coverage
 htmlcov/
 qdrant_storage/
+data/benchmark/
+data/uploads/
+data/app.db
+data/app.db-wal
+data/app.db-shm
