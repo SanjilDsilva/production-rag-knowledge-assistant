@@ -3,6 +3,8 @@ from production_rag.chunking import build_chunk_texts
 from production_rag.ingestion import LoadedBlock, load_document
 from production_rag.chunking import chunk_blocks
 from production_rag.chunking import pack_text_pieces
+import hashlib
+import json
 
 
 class SimpleTokenizer:
@@ -89,6 +91,13 @@ def test_chunk_metadata_and_ids_are_stable():
     )
 
     chunk = first_run[0]
+    expected_identity = json.dumps(
+        ["tenant-1", "user-1", "doc-001", 0],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    expected_chunk_id = hashlib.sha256(expected_identity.encode("utf-8")).hexdigest()
+    assert chunk.chunk_id == expected_chunk_id
     assert chunk.chunk_id == second_run[0].chunk_id
     assert chunk.position == 0
     assert chunk.location == "paragraph 1"

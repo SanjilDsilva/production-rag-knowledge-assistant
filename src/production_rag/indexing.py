@@ -1,7 +1,5 @@
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import QdrantClient
 
@@ -24,6 +22,7 @@ from production_rag.vector_store import (
 class IndexResult:
     document_id: str
     status: str
+    previous_document_id: str | None = None
 
 
 def index_chunks(
@@ -51,30 +50,28 @@ def index_document_file(
     path: Path,
     tenant_id: str,
     user_id: str,
+    document_id: str,
+    original_filename: str | None = None,
 ) -> IndexResult:
     validate_upload_content(path)
-    filename = path.name
+    filename = original_filename or path.name
     file_hash = hash_file_bytes(path)
 
     existing_document_id = find_document_by_file_hash(
         client, tenant_id, user_id, file_hash
     )
 
-    if existing_document_id is not None:
+    if existing_document_id is not None and existing_document_id != document_id:
         return IndexResult(existing_document_id, "already uploaded")
+
+    if existing_document_id == document_id:
+        delete_document_chunks(client, tenant_id, user_id, document_id)
 
     old_document_id = find_document_by_filename(client, tenant_id, user_id, filename)
 
     blocks = load_document(path)
     if not blocks:
         raise ValueError(f"No readable content in files: {path}")
-
-    identity = json.dumps(
-        [tenant_id, user_id, file_hash],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    document_id = str(uuid5(NAMESPACE_URL, f"production-rag:document:{identity}"))
 
     chunks = chunk_blocks(
         blocks,
@@ -86,8 +83,11 @@ def index_document_file(
     if not chunks:
         raise ValueError(f"No chunks created from file: {path}")
 
-    index_chunks(client, chunks, filename=filename, file_hash=file_hash)
+    try:
+        index_chunks(client, chunks, filename=filename, file_hash=file_hash)
+    except Exception:
+        delete_document_chunks(client, tenant_id, user_id, document_id)
+        raise
 
-    if old_document_id is not None and old_document_id != document_id:
-        delete_document_chunks(client, tenant_id, user_id, old_document_id)
-    return IndexResult(document_id, "indexed")
+    previous_document_id = old_document_id if old_document_id != document_id else None
+    return IndexResult(document_id, "indexed", previous_document_id)

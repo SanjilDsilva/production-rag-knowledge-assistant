@@ -5,6 +5,10 @@ from production_rag.answering import (
     extract_cited_chunk_ids,
     citations_for_answer,
 )
+
+from production_rag.answer_cache import BoundedAnswerCache
+from production_rag.providers import ProviderResult
+import logging
 from production_rag.citations import Citation
 from production_rag import answering
 
@@ -75,7 +79,7 @@ def test_citations_for_answer_rejects_unknown_chunk_id():
     assert citations is None
 
 
-def test_answer_question_returns_verified_source(monkeypatch):
+def test_answer_question_returns_verified_source(monkeypatch, caplog):
     chunk_id = "a" * 64
     retrieved_chunk = SimpleNamespace(
         payload={
@@ -86,6 +90,26 @@ def test_answer_question_returns_verified_source(monkeypatch):
         }
     )
     search_call = {}
+
+    caplog.set_level(logging.INFO, logger="production_rag.answering")
+    token_counts = iter([80, 35])
+    monkeypatch.setattr(
+        answering,
+        "estimate_prompt_tokens",
+        lambda messages: next(token_counts),
+    )
+
+    selected_budgets = []
+
+    def fake_select(chunks, max_context_tokens):
+        selected_budgets.append(max_context_tokens)
+        return chunks
+
+    monkeypatch.setattr(
+        answering,
+        "select_chunks_within_context_budget",
+        fake_select,
+    )
 
     monkeypatch.setattr(
         answering,
@@ -102,23 +126,36 @@ def test_answer_question_returns_verified_source(monkeypatch):
     generated_answer = f"The policy requires MFA [{chunk_id}]."
     monkeypatch.setattr(
         answering,
-        "generate_text",
-        lambda client, messages, model_name: generated_answer,
+        "generate_with_fallback",
+        lambda **kwargs: ProviderResult(text=generated_answer),
     )
 
     result = answering.answer_question(
         qdrant_client=object(),
-        llm_client=object(),
+        primary_provider=object(),
+        backup_provider=object(),
         question="What does the policy require?",
         tenant_id="tenant-a",
         user_id="user-a",
-        model_name="test-model",
+        ready_document_ids=["doc-1"],
+        answer_cache=BoundedAnswerCache(),
+        document_set_version="docs-v1",
     )
 
     assert result.answer == generated_answer
     assert result.citations == [Citation(chunk_id, "security.pdf", "page 4")]
     assert search_call["tenant_id"] == "tenant-a"
     assert search_call["user_id"] == "user-a"
+    assert search_call["ready_document_ids"] == ["doc-1"]
+    assert selected_budgets == [3000]
+    budget_log = next(
+        record
+        for record in caplog.records
+        if record.message == "context_budget_applied"
+    )
+    assert budget_log.prompt_tokens_before == 80
+    assert budget_log.prompt_tokens_after == 35
+    assert "What does the policy require?" not in caplog.text
 
 
 def test_answer_question_rejects_a_citation_from_an_unretrieved_chunk(monkeypatch):
@@ -132,6 +169,12 @@ def test_answer_question_rejects_a_citation_from_an_unretrieved_chunk(monkeypatc
     )
 
     monkeypatch.setattr(answering, "embed_query", lambda question: [0.0] * 384)
+    monkeypatch.setattr(answering, "estimate_prompt_tokens", lambda messages: 20)
+    monkeypatch.setattr(
+        answering,
+        "select_chunks_within_context_budget",
+        lambda chunks, max_context_tokens: chunks,
+    )
     monkeypatch.setattr(
         answering,
         "search_chunks",
@@ -139,17 +182,20 @@ def test_answer_question_rejects_a_citation_from_an_unretrieved_chunk(monkeypatc
     )
     monkeypatch.setattr(
         answering,
-        "generate_text",
-        lambda client, messages, model_name: f"Unsupported claim [{'b' * 64}].",
+        "generate_with_fallback",
+        lambda **kwargs: ProviderResult(text=f"Unsupported claim [{'b' * 64}]."),
     )
 
     result = answering.answer_question(
         qdrant_client=object(),
-        llm_client=object(),
+        primary_provider=object(),
+        backup_provider=object(),
         question="What does the policy require?",
         tenant_id="tenant-a",
         user_id="user-a",
-        model_name="test-model",
+        ready_document_ids=["doc-1"],
+        answer_cache=BoundedAnswerCache(),
+        document_set_version="docs-v1",
     )
 
     assert result.answer == answering.UNSUPPORTED_ANSWER
@@ -162,19 +208,22 @@ def test_answer_question_skips_ai_when_search_finds_nothing(monkeypatch):
 
     generation_calls = []
 
-    def fake_generate(client, messages, model_name):
+    def fake_generate(**kwargs):
         generation_calls.append(True)
-        return "This should never be generated."
+        return ProviderResult(text="This should never be generated.")
 
-    monkeypatch.setattr(answering, "generate_text", fake_generate)
+    monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
 
     result = answering.answer_question(
         qdrant_client=object(),
-        llm_client=object(),
+        primary_provider=object(),
+        backup_provider=object(),
         question="What does the policy require?",
         tenant_id="tenant-a",
         user_id="user-a",
-        model_name="test-model",
+        ready_document_ids=["doc-1"],
+        answer_cache=BoundedAnswerCache(),
+        document_set_version="docs-v1",
     )
 
     assert result.answer == answering.UNSUPPORTED_ANSWER
@@ -205,3 +254,54 @@ def test_benchmark_answer_citation_uses_document_id():
             location="description",
         )
     ]
+
+
+def test_answer_question_reuses_cached_answer(monkeypatch):
+    chunk_id = "a" * 64
+    retrieved_chunk = SimpleNamespace(
+        payload={
+            "chunk_id": chunk_id,
+            "document_id": "doc-1",
+            "filename": "security.pdf",
+            "location": "page 4",
+            "text": "The policy requires multi-factor authentication.",
+        }
+    )
+    cache = BoundedAnswerCache()
+    provider_calls = []
+    generated_answer = f"The policy requires MFA [{chunk_id}]."
+
+    monkeypatch.setattr(answering, "embed_query", lambda question: [0.0] * 384)
+    monkeypatch.setattr(answering, "search_chunks", lambda **kwargs: [retrieved_chunk])
+    monkeypatch.setattr(answering, "estimate_prompt_tokens", lambda messages: 20)
+    monkeypatch.setattr(
+        answering,
+        "select_chunks_within_context_budget",
+        lambda chunks, max_context_tokens: chunks,
+    )
+
+    def fake_generate(**kwargs):
+        provider_calls.append(True)
+        return ProviderResult(text=generated_answer)
+
+    monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
+
+    def ask():
+        return answering.answer_question(
+            qdrant_client=object(),
+            primary_provider=object(),
+            backup_provider=object(),
+            question="What does the policy require?",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            ready_document_ids=["doc-1"],
+            answer_cache=cache,
+            document_set_version="version-1",
+        )
+
+    first = ask()
+    second = ask()
+
+    assert first == second
+    assert first.answer == generated_answer
+    assert len(provider_calls) == 1

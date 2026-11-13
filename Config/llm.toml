@@ -1,0 +1,11 @@
+[models]
+primary = "gemini-3.6-flash"
+backup = "openai/gpt-oss-20b"
+
+[limits]
+context_tokens = 3000
+output_tokens = 512
+request_timeout_seconds = 15
+attempts_per_provider = 3
+retry_initial_delay_seconds = 1
+retry_max_delay_seconds = 4

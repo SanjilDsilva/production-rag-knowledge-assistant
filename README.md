@@ -10,3 +10,8 @@ Measured on the local Qdrant benchmark collection with 10,792 CVE chunks and a 5
 | Hybrid + reranker | Not evaluated | Not evaluated | Not evaluated | Not measured | Not measured |
 
 Latency measures local Qdrant search calls only; query embedding is excluded. Each mode used 46 warmed samples after one warm-up call. These timings are not API or end-to-end latency and do not establish the app's 2.5-second target.
+
+
+## Privacy
+
+Questions and retrieved document text are sent to Gemini or Groq to generate answers. Free-tier providers may use submitted text under their terms. Use only public or sample documents with free-tier providers; do not upload confidential or personal documents.

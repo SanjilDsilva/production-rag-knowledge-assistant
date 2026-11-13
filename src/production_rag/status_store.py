@@ -17,7 +17,7 @@ class DocumentStatusStore:
                     CREATE TABLE IF NOT EXISTS document_status (
                     tenant_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
-                    document_Id TEXT NOT NULL,
+                    document_id TEXT NOT NULL,
                     original_filename TEXT NOT NULL,
                     file_hash TEXT NOT NULL,
                     storage_key TEXT NOT NULL,
@@ -28,7 +28,47 @@ class DocumentStatusStore:
                     )
                     """
             )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS document_set_versions (
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                PRIMARY KEY (tenant_id, user_id)
+                )
+                """
+            )
             connection.commit()
+
+    def get_document_set_version(self, tenant_id: str, user_id: str) -> str:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT version
+                FROM document_set_versions
+                WHERE tenant_id = ? AND user_id = ?
+                """,
+                (tenant_id, user_id),
+            ).fetchone()
+
+        return str(row[0]) if row is not None else "0"
+
+    def _bump_document_set_version(
+        self,
+        connection: sqlite3.Connection,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO document_set_versions (tenant_id, user_id, version)
+            VALUES (?, ?, 1)
+            ON CONFLICT (tenant_id, user_id)
+            DO UPDATE SET version = version + 1
+            """,
+            (tenant_id, user_id),
+        )
 
     def create_queued(
         self,
@@ -58,6 +98,7 @@ class DocumentStatusStore:
                         storage_key,
                     ),
                 )
+                self._bump_document_set_version(connection, tenant_id, user_id)
 
     def list_for_user(
         self,
@@ -68,7 +109,7 @@ class DocumentStatusStore:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """
-                SELECT document_id, original_filename, status, error_message
+                SELECT document_id AS document_id, original_filename, status, error_message
                 FROM document_status
                 WHERE tenant_id = ? AND user_id = ?
                 """,
@@ -76,6 +117,64 @@ class DocumentStatusStore:
             ).fetchall()
 
         return [dict(row) for row in rows]
+
+    def get_for_user(
+        self,
+        tenant_id: str,
+        user_id: str,
+        document_id: str,
+    ) -> dict[str, str] | None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT document_id, original_filename, storage_key, status
+                FROM document_status
+                WHERE tenant_id = ? AND user_id = ? AND document_id = ?
+                """,
+                (tenant_id, user_id, document_id),
+            ).fetchone()
+
+            return dict(row) if row is not None else None
+
+    def ready_document_ids(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[str]:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT document_id
+                FROM document_status
+                WHERE tenant_id = ? AND user_id = ? AND status = 'ready'
+                """,
+                (tenant_id, user_id),
+            ).fetchall()
+
+        return [row[0] for row in rows]
+
+    def find_active_by_file_hash(
+        self,
+        tenant_id: str,
+        user_id: str,
+        file_hash: str,
+    ) -> dict[str, str | None] | None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT document_id AS document_id, original_filename, status, error_message
+                FROM document_status
+                WHERE tenant_id = ? AND user_id = ? AND file_hash = ?
+                    AND status IN ('queued', 'processing', 'ready')
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (tenant_id, user_id, file_hash),
+            ).fetchone()
+
+            return dict(row) if row is not None else None
 
     def update_status(
         self,
@@ -101,6 +200,12 @@ class DocumentStatusStore:
                         document_id,
                     ),
                 )
+                if result.rowcount == 1 and status == "ready":
+                    self._bump_document_set_version(
+                        connection,
+                        tenant_id,
+                        user_id,
+                    )
 
         return result.rowcount == 1
 
@@ -131,4 +236,10 @@ class DocumentStatusStore:
                     """,
                     (tenant_id, user_id, document_id),
                 )
+                if result.rowcount == 1:
+                    self._bump_document_set_version(
+                        connection,
+                        tenant_id,
+                        user_id,
+                    )
         return result.rowcount == 1

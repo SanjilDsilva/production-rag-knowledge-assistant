@@ -101,8 +101,12 @@ def test_same_file_twice_skips_second_processing(tmp_path, monkeypatch):
     monkeypatch.setattr(indexing, "index_chunks", fake_index, raising=False)
 
     client = object()
-    first = indexing.index_document_file(client, path, "tenant-a", "user-a")
-    second = indexing.index_document_file(client, path, "tenant-a", "user-a")
+    first = indexing.index_document_file(
+        client, path, "tenant-a", "user-a", document_id="doc-1"
+    )
+    second = indexing.index_document_file(
+        client, path, "tenant-a", "user-a", document_id="doc-2"
+    )
 
     assert first.status == "indexed"
     assert second.status == "already uploaded"
@@ -140,10 +144,20 @@ def test_changed_file_with_same_name_replaces_old_chunks(tmp_path, monkeypatch):
         )
 
         path.write_text("Old document version.", encoding="utf-8")
-        old = indexing.index_document_file(client, path, "tenant-a", "user-a")
+        old = indexing.index_document_file(
+            client, path, "tenant-a", "user-a", "old-doc"
+        )
 
-        path.write_text("New document version.", encoding="utf-8")
-        new = indexing.index_document_file(client, path, "tenant-a", "user-a")
+        new_path = tmp_path / "random-storage-name.txt"
+        new_path.write_text("New document version.", encoding="utf-8")
+        new = indexing.index_document_file(
+            client,
+            new_path,
+            "tenant-a",
+            "user-a",
+            document_id="new-doc",
+            original_filename="shared.txt",
+        )
 
         points, _ = client.scroll(
             collection_name=vector_store.COLLECTION_NAME,
@@ -152,9 +166,15 @@ def test_changed_file_with_same_name_replaces_old_chunks(tmp_path, monkeypatch):
             with_vectors=False,
         )
 
-        assert old.document_id != new.document_id
-        assert {point.payload["document_id"] for point in points} == {new.document_id}
-        assert {point.payload["text"] for point in points} == {"New document version."}
+        assert new.previous_document_id == old.document_id
+        assert {point.payload["document_id"] for point in points} == {
+            old.document_id,
+            new.document_id,
+        }
+        assert {point.payload["text"] for point in points} == {
+            "Old document version.",
+            "New document version.",
+        }
     finally:
         client.close()
 
@@ -169,7 +189,7 @@ def test_same_file_for_two_tenants_is_indexed_separately(tmp_path, monkeypatch):
         def fake_chunk(blocks, document_id, tenant_id, user_id):
             return [
                 Chunk(
-                    chunk_id=document_id + "-chunk",
+                    chunk_id=f"{tenant_id}-{user_id}-{document_id}-0",
                     document_id=document_id,
                     position=0,
                     text=blocks[0].text,
@@ -188,8 +208,12 @@ def test_same_file_for_two_tenants_is_indexed_separately(tmp_path, monkeypatch):
             lambda texts: [[1.0] + [0.0] * 383 for _ in texts],
         )
 
-        first = indexing.index_document_file(client, path, "tenant-a", "user-a")
-        second = indexing.index_document_file(client, path, "tenant-b", "user-a")
+        first = indexing.index_document_file(
+            client, path, "tenant-a", "user-a", document_id="shared-doc"
+        )
+        second = indexing.index_document_file(
+            client, path, "tenant-b", "user-a", document_id="shared-doc"
+        )
 
         points, _ = client.scroll(
             collection_name=vector_store.COLLECTION_NAME,
@@ -200,7 +224,8 @@ def test_same_file_for_two_tenants_is_indexed_separately(tmp_path, monkeypatch):
 
         assert first.status == "indexed"
         assert second.status == "indexed"
-        assert first.document_id != second.document_id
+        assert first.document_id == second.document_id == "shared-doc"
+        assert len(points) == 2
         assert {point.payload["tenant_id"] for point in points} == {
             "tenant-a",
             "tenant-b",
@@ -219,4 +244,127 @@ def test_indexing_rejects_text_file_named_pdf(tmp_path):
             path=path,
             tenant_id="tenant-a",
             user_id="user-a",
+            document_id="fake-doc",
         )
+
+
+def test_retry_after_interrupted_indexing_replaces_partial_chunks(
+    tmp_path, monkeypatch
+):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        path = tmp_path / "shared.txt"
+        path.write_text("Complete document text.", encoding="utf-8")
+        file_hash = indexing.hash_file_bytes(path)
+
+        partial_chunk = Chunk(
+            chunk_id="old-partial",
+            document_id="doc-1",
+            position=0,
+            text="Only part saved before the interruption.",
+            chunker_version="test-v1",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            location="page 1",
+            content_hash="c" * 64,
+        )
+        vector_store.upsert_chunks(
+            client,
+            [partial_chunk],
+            [[1.0] + [0.0] * 383],
+            filename=path.name,
+            file_hash=file_hash,
+        )
+
+        def fake_chunk(blocks, document_id, tenant_id, user_id):
+            return [
+                Chunk(
+                    chunk_id="complete-chunk",
+                    document_id=document_id,
+                    position=0,
+                    text=blocks[0].text,
+                    chunker_version="test-v1",
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    location=blocks[0].location,
+                    content_hash="d" * 64,
+                )
+            ]
+
+        monkeypatch.setattr(indexing, "chunk_blocks", fake_chunk)
+        monkeypatch.setattr(
+            indexing,
+            "embed_documents",
+            lambda texts: [[1.0] + [0.0] * 383 for _ in texts],
+        )
+
+        result = indexing.index_document_file(
+            client, path, "tenant-a", "user-a", document_id="doc-1"
+        )
+
+        points, _ = client.scroll(
+            collection_name=vector_store.COLLECTION_NAME,
+            limit=10,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        assert result.status == "indexed"
+        assert len(points) == 1
+        assert points[0].payload["chunk_id"] == "complete-chunk"
+    finally:
+        client.close()
+
+
+def test_indexing_failure_removes_partial_chunks(tmp_path, monkeypatch):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        path = tmp_path / "sample.txt"
+        path.write_text("A small test document.", encoding="utf-8")
+
+        def fake_chunk(blocks, document_id, tenant_id, user_id):
+            return [
+                Chunk(
+                    chunk_id="partial-chunk",
+                    document_id=document_id,
+                    position=0,
+                    text=blocks[0].text,
+                    chunker_version="test-v1",
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    location=blocks[0].location,
+                    content_hash="d" * 64,
+                )
+            ]
+
+        monkeypatch.setattr(indexing, "chunk_blocks", fake_chunk)
+        monkeypatch.setattr(
+            indexing,
+            "embed_documents",
+            lambda texts: [[1.0] + [0.0] * 383 for _ in texts],
+        )
+
+        real_upsert = indexing.upsert_chunks
+
+        def write_one_then_fail(client, chunks, vectors, filename, file_hash):
+            real_upsert(client, chunks[:1], vectors[:1], filename, file_hash)
+            raise RuntimeError("simulated indexing failure")
+
+        monkeypatch.setattr(indexing, "upsert_chunks", write_one_then_fail)
+
+        with pytest.raises(RuntimeError, match="simulated indexing failure"):
+            indexing.index_document_file(
+                client, path, "tenant-a", "user-a", document_id="doc-1"
+            )
+
+        points, _ = client.scroll(
+            collection_name=vector_store.COLLECTION_NAME,
+            limit=10,
+            with_payload=True,
+            with_vectors=False,
+        )
+        assert points == []
+    finally:
+        client.close()

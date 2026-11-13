@@ -189,22 +189,29 @@ def search_chunks(
     query_vector: list[float],
     tenant_id: str,
     user_id: str,
+    ready_document_ids: list[str] | None = None,
     limit: int = 5,
     search_mode: str = "hybrid",
 ) -> list[models.ScoredPoint]:
-    access_filter = models.Filter(
-        must=[
+    access_conditions = [
+        models.FieldCondition(
+            key="tenant_id",
+            match=models.MatchValue(value=tenant_id),
+        ),
+        models.FieldCondition(
+            key="user_id",
+            match=models.MatchValue(value=user_id),
+        ),
+    ]
+    if ready_document_ids is not None:
+        access_conditions.append(
             models.FieldCondition(
-                key="tenant_id",
-                match=models.MatchValue(value=tenant_id),
-            ),
-            models.FieldCondition(
-                key="user_id",
-                match=models.MatchValue(value=user_id),
-            ),
-        ]
-    )
+                key="document_id",
+                match=models.MatchAny(any=ready_document_ids),
+            )
+        )
 
+    access_filter = models.Filter(must=access_conditions)
     if search_mode not in ("dense", "keyword", "hybrid"):
         raise ValueError("Search_mode must be dense, keyword, or hybrid")
 

@@ -266,3 +266,62 @@ def test_upload_upsert_marks_source_as_user_upload(tmp_path):
         assert points[0].payload["source"] == "user_upload"
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("search_mode", ["dense", "keyword", "hybrid"])
+def test_search_returns_only_ready_documents(tmp_path, search_mode):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        vector = [1.0] + [0.0] * 383
+
+        client.upsert(
+            collection_name=vector_store.COLLECTION_NAME,
+            points=[
+                models.PointStruct(
+                    id=1,
+                    vector={vector_store.DENSE_VECTOR_NAME: vector},
+                    payload={
+                        "tenant_id": "tenant-a",
+                        "user_id": "user-a",
+                        "document_id": "ready-doc",
+                        "text": "Project policy is ready.",
+                    },
+                ),
+                models.PointStruct(
+                    id=2,
+                    vector={vector_store.DENSE_VECTOR_NAME: vector},
+                    payload={
+                        "tenant_id": "tenant-a",
+                        "user_id": "user-a",
+                        "document_id": "processing-doc",
+                        "text": "Project policy is still processing.",
+                    },
+                ),
+            ],
+        )
+
+        results = vector_store.search_chunks(
+            client=client,
+            query_text="project policy",
+            query_vector=vector,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            ready_document_ids=["ready-doc"],
+            search_mode=search_mode,
+        )
+
+        assert {point.payload["document_id"] for point in results} == {"ready-doc"}
+
+        no_ready_results = vector_store.search_chunks(
+            client=client,
+            query_text="project policy",
+            query_vector=vector,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            ready_document_ids=[],
+            search_mode=search_mode,
+        )
+        assert no_ready_results == []
+    finally:
+        client.close()
