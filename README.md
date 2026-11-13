@@ -76,9 +76,9 @@ The following retrieval ablation was measured on a local Qdrant collection conta
 
 | Search mode | Recall@5 | MRR@5 | nDCG@5 | p50 search time | p95 search time |
 |---|---:|---:|---:|---:|---:|
-| Dense vector search | 0.816 | 0.833 | 0.793 | 254.43 ms | 287.52 ms |
-| BM25 keyword search | 0.993 | 0.979 | 0.979 | 783.17 ms | 949.26 ms |
-| Hybrid: dense + BM25 with RRF | 0.993 | 0.933 | 0.928 | 1316.79 ms | 1493.12 ms |
+| Dense vector search | 0.816 | 0.833 | 0.793 | 255.73 ms | 281.69 ms |
+| BM25 keyword search | 0.993 | 0.979 | 0.979 | 795.13 ms | 1004.91 ms |
+| Hybrid: dense + BM25 with RRF | 0.993 | 0.933 | 0.928 | 1288.21 ms | 1487.77 ms |
 | Hybrid + reranker | Not evaluated | Not evaluated | Not evaluated | Not measured | Not measured |
 
 **How to read this table:** Recall measures whether relevant chunks appear in the top five. MRR rewards finding the first relevant chunk near the top. nDCG rewards ranking several relevant chunks well. p50 is the middle measured time; p95 is the time that 95% of these measured searches finished within.
