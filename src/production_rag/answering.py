@@ -62,6 +62,14 @@ def log_answer_audit(
     )
 
 
+def log_answer_stage_timing(stage: str, started_at: float) -> None:
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    logger.info(
+        "answer_stage_timing",
+        extra={"stage": stage, "elapsed_ms": round(elapsed_ms, 2)},
+    )
+
+
 def build_messages(
     question: str,
     retrieved_chunks: list[models.ScoredPoint],
@@ -154,13 +162,25 @@ def answer_question(
     document_set_version: str,
     limit: int = 5,
     search_mode: str = "hybrid",
+    role: str = "member",
 ) -> AnswerResult:
     if not question.strip():
         raise ValueError("Question cannot be empty")
 
     request_started_at = time.perf_counter()
 
+    embedding_started_at = time.perf_counter()
     query_vector = embed_query(question)
+    embedding_ms = (time.perf_counter() - embedding_started_at) * 1000
+    logger.info(
+        "answer_stage_timing",
+        extra={
+            "stage": "query_embedding",
+            "elapsed_ms": round(embedding_ms, 2),
+        },
+    )
+
+    retrieval_started_at = time.perf_counter()
     retrieved_chunks = search_chunks(
         client=qdrant_client,
         query_text=question,
@@ -170,6 +190,18 @@ def answer_question(
         ready_document_ids=ready_document_ids,
         limit=limit,
         search_mode=search_mode,
+        role=role,
+    )
+    retrieval_ms = (time.perf_counter() - retrieval_started_at) * 1000
+    logger.info(
+        "answer_stage_timing",
+        extra={
+            "stage": "retrieval",
+            "elapsed_ms": round(retrieval_ms, 2),
+            "search_mode": search_mode,
+            "fusion_included": search_mode == "hybrid",
+            "reranker_used": False,
+        },
     )
 
     if not retrieved_chunks:
@@ -181,10 +213,12 @@ def answer_question(
     config = load_llm_config()
     context_token_limit = config["limits"]["context_tokens"]
 
+    context_started_at = time.perf_counter()
     selected_chunks = select_chunks_within_context_budget(
         retrieved_chunks,
         context_token_limit,
     )
+    log_answer_stage_timing("context_selection", context_started_at)
     if not selected_chunks:
         logger.info(
             "context_budget_applied",
@@ -218,6 +252,7 @@ def answer_question(
         document_set_version,
         PROMPT_VERSION,
         model_name,
+        visible_document_ids=ready_document_ids,
     )
 
     used_document_ids = []
@@ -233,7 +268,9 @@ def answer_question(
     cache_stats = answer_cache.stats()
 
     if cached_answer is not None:
+        citation_started_at = time.perf_counter()
         cached_citations = citations_for_answer(cached_answer, selected_chunks)
+        log_answer_stage_timing("citation_validation", citation_started_at)
         if cached_citations is not None:
             logger.info(
                 "answer_cache_lookup",
@@ -276,6 +313,8 @@ def answer_question(
         },
     )
 
+    generation_started_at = time.perf_counter()
+
     try:
         provider_result = generate_with_fallback(
             primary=primary_provider,
@@ -286,6 +325,7 @@ def answer_question(
             max_delay_seconds=config["limits"]["retry_max_delay_seconds"],
         )
     except ProviderUnavailableError as error:
+        log_answer_stage_timing("model_generation", generation_started_at)
         log_answer_audit(
             tenant_id,
             user_id,
@@ -305,9 +345,11 @@ def answer_question(
         )
         return AnswerResult(str(error), [])
 
+    log_answer_stage_timing("model_generation", generation_started_at)
     answer = provider_result.text
+    citation_started_at = time.perf_counter()
     citations = citations_for_answer(answer, selected_chunks)
-
+    log_answer_stage_timing("citation_validation", citation_started_at)
     if citations is None:
         log_answer_audit(
             tenant_id,

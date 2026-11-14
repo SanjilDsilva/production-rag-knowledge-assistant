@@ -7,7 +7,7 @@ from production_rag.answering import (
 )
 
 from production_rag.answer_cache import BoundedAnswerCache
-from production_rag.providers import ProviderResult
+from production_rag.providers import ProviderResult, ProviderUnavailableError
 import logging
 from production_rag.citations import Citation
 from production_rag import answering
@@ -140,6 +140,7 @@ def test_answer_question_returns_verified_source(monkeypatch, caplog):
         ready_document_ids=["doc-1"],
         answer_cache=BoundedAnswerCache(),
         document_set_version="docs-v1",
+        role="admin",
     )
 
     assert result.answer == generated_answer
@@ -147,6 +148,20 @@ def test_answer_question_returns_verified_source(monkeypatch, caplog):
     assert search_call["tenant_id"] == "tenant-a"
     assert search_call["user_id"] == "user-a"
     assert search_call["ready_document_ids"] == ["doc-1"]
+    assert search_call["role"] == "admin"
+    stage_logs = [
+        record for record in caplog.records if record.message == "answer_stage_timing"
+    ]
+    assert [record.stage for record in stage_logs] == [
+        "query_embedding",
+        "retrieval",
+        "context_selection",
+        "model_generation",
+        "citation_validation",
+    ]
+    assert all(record.elapsed_ms >= 0 for record in stage_logs)
+    assert stage_logs[1].fusion_included is True
+    assert stage_logs[1].reranker_used is False
     assert selected_budgets == [3000]
     budget_log = next(
         record
@@ -305,3 +320,203 @@ def test_answer_question_reuses_cached_answer(monkeypatch):
     assert first == second
     assert first.answer == generated_answer
     assert len(provider_calls) == 1
+
+
+def test_answer_question_refreshes_after_shared_document_is_removed(monkeypatch):
+    shared_id = "a" * 64
+    private_id = "b" * 64
+
+    def make_chunk(chunk_id, document_id, filename, text):
+        return SimpleNamespace(
+            payload={
+                "chunk_id": chunk_id,
+                "document_id": document_id,
+                "filename": filename,
+                "location": "page 1",
+                "text": text,
+            }
+        )
+
+    chunks = {
+        "shared-doc": make_chunk(
+            shared_id, "shared-doc", "shared.txt", "Shared policy text."
+        ),
+        "private-doc": make_chunk(
+            private_id, "private-doc", "private.txt", "Private policy text."
+        ),
+    }
+    answers = iter(
+        [
+            f"Answer from shared policy [{shared_id}].",
+            f"Answer from private policy [{private_id}].",
+        ]
+    )
+    provider_calls = []
+
+    monkeypatch.setattr(answering, "embed_query", lambda question: [0.0] * 384)
+    monkeypatch.setattr(
+        answering,
+        "search_chunks",
+        lambda **kwargs: [chunks[doc_id] for doc_id in kwargs["ready_document_ids"]],
+    )
+    monkeypatch.setattr(answering, "estimate_prompt_tokens", lambda messages: 20)
+    monkeypatch.setattr(
+        answering,
+        "select_chunks_within_context_budget",
+        lambda retrieved, limit: retrieved,
+    )
+
+    def fake_generate(**kwargs):
+        provider_calls.append(True)
+        return ProviderResult(text=next(answers))
+
+    monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
+    cache = BoundedAnswerCache()
+
+    def ask(document_ids):
+        return answering.answer_question(
+            qdrant_client=object(),
+            primary_provider=object(),
+            backup_provider=object(),
+            question="What is the policy?",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            role="member",
+            ready_document_ids=document_ids,
+            answer_cache=cache,
+            document_set_version="unchanged-owner-version",
+        )
+
+    first = ask(["shared-doc", "private-doc"])
+    after_removal = ask(["private-doc"])
+
+    assert "shared policy" in first.answer
+    assert "private policy" in after_removal.answer
+    assert len(provider_calls) == 2
+
+
+def test_answer_cache_is_separate_between_users_and_tenants(monkeypatch):
+    chunk_ids = {
+        "doc-a": "a" * 64,
+        "doc-b": "b" * 64,
+        "doc-c": "c" * 64,
+    }
+    chunks = {
+        document_id: SimpleNamespace(
+            payload={
+                "chunk_id": chunk_ids[document_id],
+                "document_id": document_id,
+                "filename": f"{document_id}.txt",
+                "location": "page 1",
+                "text": f"Policy text for {document_id}.",
+            }
+        )
+        for document_id in chunk_ids
+    }
+
+    answers = iter(
+        [
+            f"Answer A [{chunk_ids['doc-a']}].",
+            f"Answer B [{chunk_ids['doc-b']}].",
+            f"Answer C [{chunk_ids['doc-c']}].",
+        ]
+    )
+    provider_calls = []
+
+    monkeypatch.setattr(answering, "embed_query", lambda question: [0.0] * 384)
+    monkeypatch.setattr(
+        answering,
+        "search_chunks",
+        lambda **kwargs: [chunks[kwargs["ready_document_ids"][0]]],
+    )
+    monkeypatch.setattr(answering, "estimate_prompt_tokens", lambda messages: 20)
+    monkeypatch.setattr(
+        answering,
+        "select_chunks_within_context_budget",
+        lambda retrieved, limit: retrieved,
+    )
+
+    def fake_generate(**kwargs):
+        provider_calls.append(True)
+        return ProviderResult(text=next(answers))
+
+    monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
+    cache = BoundedAnswerCache()
+
+    def ask(tenant_id, user_id, document_id):
+        return answering.answer_question(
+            qdrant_client=object(),
+            primary_provider=object(),
+            backup_provider=object(),
+            question="What is the policy?",
+            tenant_id=tenant_id,
+            user_id=user_id,
+            ready_document_ids=[document_id],
+            answer_cache=cache,
+            document_set_version="version-1",
+        )
+
+    first = ask("tenant-a", "user-a", "doc-a")
+    same_user_again = ask("tenant-a", "user-a", "doc-a")
+    other_user = ask("tenant-a", "user-b", "doc-b")
+    other_tenant = ask("tenant-b", "user-a", "doc-c")
+
+    assert first == same_user_again
+    assert other_user.answer == f"Answer B [{chunk_ids['doc-b']}]."
+    assert other_tenant.answer == f"Answer C [{chunk_ids['doc-c']}]."
+    assert len(provider_calls) == 3
+
+
+def test_answer_question_does_not_cache_provider_failure(monkeypatch):
+    chunk_id = "a" * 64
+    chunk = SimpleNamespace(
+        payload={
+            "chunk_id": chunk_id,
+            "document_id": "doc-1",
+            "filename": "policy.txt",
+            "location": "page 1",
+            "text": "The policy requires approval.",
+        }
+    )
+    provider_calls = []
+    generated_answer = f"Approval is required [{chunk_id}]."
+
+    monkeypatch.setattr(answering, "embed_query", lambda question: [0.0] * 384)
+    monkeypatch.setattr(answering, "search_chunks", lambda **kwargs: [chunk])
+    monkeypatch.setattr(answering, "estimate_prompt_tokens", lambda messages: 20)
+    monkeypatch.setattr(
+        answering,
+        "select_chunks_within_context_budget",
+        lambda retrieved, limit: retrieved,
+    )
+
+    def fake_generate(**kwargs):
+        provider_calls.append(True)
+        if len(provider_calls) == 1:
+            raise ProviderUnavailableError("Temporary provider failure")
+        return ProviderResult(text=generated_answer)
+
+    monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
+    cache = BoundedAnswerCache()
+
+    def ask():
+        return answering.answer_question(
+            qdrant_client=object(),
+            primary_provider=object(),
+            backup_provider=object(),
+            question="What approval is required?",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            ready_document_ids=["doc-1"],
+            answer_cache=cache,
+            document_set_version="version-1",
+        )
+
+    failed = ask()
+    succeeded = ask()
+    cached_success = ask()
+
+    assert failed.answer == "Temporary provider failure"
+    assert succeeded.answer == generated_answer
+    assert cached_success == succeeded
+    assert len(provider_calls) == 2

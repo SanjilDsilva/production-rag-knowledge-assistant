@@ -24,10 +24,25 @@ class DocumentStatusStore:
                     status TEXT NOT NULL
                         CHECK (status IN ('queued', 'processing', 'ready', 'failed')),
                     error_message TEXT,
+                    visibility TEXT NOT NULL DEFAULT 'private'
+                    CHECK (visibility IN ('private', 'tenant_shared')),
                     PRIMARY KEY (tenant_id, user_id, document_id)
                     )
                     """
             )
+
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(document_status)")
+            }
+            if "visibility" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE document_status
+                    ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'
+                    CHECK (visibility IN ('private', 'tenant_shared'))
+                    """
+                )
 
             connection.execute(
                 """
@@ -78,16 +93,20 @@ class DocumentStatusStore:
         original_filename: str,
         file_hash: str,
         storage_key: str,
+        visibility: str = "private",
     ) -> None:
+        if visibility not in {"private", "tenant_shared"}:
+            raise ValueError("Document visibility is not allowed")
+
         with closing(sqlite3.connect(self.database_path)) as connection:
             with connection:
                 connection.execute(
                     """
                     INSERT INTO document_status (
                         tenant_id, user_id, document_id, original_filename,
-                        file_hash, storage_key, status, error_message
+                        file_hash, storage_key, status, error_message, visibility
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL)
+                    VALUES (?, ?, ?, ?, ?, ?, 'queued', NULL, ?)
                     """,
                     (
                         tenant_id,
@@ -96,6 +115,7 @@ class DocumentStatusStore:
                         original_filename,
                         file_hash,
                         storage_key,
+                        visibility,
                     ),
                 )
                 self._bump_document_set_version(connection, tenant_id, user_id)
@@ -118,6 +138,35 @@ class DocumentStatusStore:
 
         return [dict(row) for row in rows]
 
+    def list_accessible(
+        self,
+        tenant_id: str,
+        user_id: str,
+        role: str,
+    ) -> list[dict[str, str | None]]:
+        if role == "admin":
+            query = """
+                SELECT document_id, original_filename, status, error_message, visibility
+                FROM document_status
+                WHERE tenant_id = ?
+            """
+            parameters = (tenant_id,)
+        elif role == "member":
+            query = """
+                SELECT  document_id, original_filename, status, error_message, visibility
+                FROM document_status
+                WHERE tenant_id = ? AND (user_id = ? OR visibility = 'tenant_shared')    
+            """
+            parameters = (tenant_id, user_id)
+        else:
+            return []
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(query, parameters).fetchall()
+
+        return [dict(row) for row in rows]
+
     def get_for_user(
         self,
         tenant_id: str,
@@ -128,7 +177,7 @@ class DocumentStatusStore:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
                 """
-                SELECT document_id, original_filename, storage_key, status
+                SELECT document_id, original_filename, storage_key, status, visibility
                 FROM document_status
                 WHERE tenant_id = ? AND user_id = ? AND document_id = ?
                 """,
@@ -137,20 +186,60 @@ class DocumentStatusStore:
 
             return dict(row) if row is not None else None
 
+    def get_visible_document(
+        self,
+        tenant_id: str,
+        user_id: str,
+        role: str,
+        document_id: str,
+    ) -> dict[str, str] | None:
+        if role == "admin":
+            query = """
+                SELECT tenant_id, user_id, document_id, storage_key, visibility
+                FROM document_status
+                WHERE tenant_id = ? AND document_id = ?
+            """
+            parameters = (tenant_id, document_id)
+        elif role == "member":
+            query = """
+                SELECT tenant_id, user_id, document_id, storage_key, visibility
+                FROM document_status
+                WHERE tenant_id = ? AND document_id = ? AND (user_id = ? OR visibility = 'tenant_shared')
+            """
+            parameters = (tenant_id, document_id, user_id)
+        else:
+            return None
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(query, parameters).fetchone()
+
+        return dict(row) if row is not None else None
+
     def ready_document_ids(
         self,
         tenant_id: str,
         user_id: str,
+        role: str = "member",
     ) -> list[str]:
-        with closing(sqlite3.connect(self.database_path)) as connection:
-            rows = connection.execute(
-                """
+        if role == "admin":
+            query = """
                 SELECT document_id
                 FROM document_status
-                WHERE tenant_id = ? AND user_id = ? AND status = 'ready'
-                """,
-                (tenant_id, user_id),
-            ).fetchall()
+                WHERE tenant_id = ? AND status = 'ready'    
+            """
+            parameters = (tenant_id,)
+        elif role == "member":
+            query = """
+                SELECT document_id
+                FROM document_status
+                WHERE tenant_id = ? AND status = 'ready'
+                AND (user_id = ? OR visibility = 'tenant_shared')
+            """
+            parameters = (tenant_id, user_id)
+        else:
+            return []
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            rows = connection.execute(query, parameters).fetchall()
 
         return [row[0] for row in rows]
 

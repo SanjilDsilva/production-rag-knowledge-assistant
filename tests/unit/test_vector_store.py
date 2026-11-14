@@ -325,3 +325,123 @@ def test_search_returns_only_ready_documents(tmp_path, search_mode):
         assert no_ready_results == []
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("visibility", ["private", "tenant_shared"])
+def test_user_upload_point_stores_visibility(visibility):
+    chunk = Chunk(
+        chunk_id="a" * 64,
+        document_id="doc-a",
+        position=0,
+        text="Example upload text.",
+        chunker_version="test-v1",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        location="page 1",
+        content_hash="b" * 64,
+    )
+
+    point = vector_store.point_for_chunk(
+        chunk,
+        [1.0] + [0.0] * 383,
+        source="user_upload",
+        filename="example.txt",
+        file_hash="c" * 64,
+        visibility=visibility,
+    )
+
+    assert point.payload["visibility"] == visibility
+
+
+def test_upsert_chunks_stores_shared_visibility(tmp_path):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        chunk = Chunk(
+            chunk_id="d" * 64,
+            document_id="shared-doc",
+            position=0,
+            text="Shared upload text.",
+            chunker_version="test-v1",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            location="page 1",
+            content_hash="e" * 64,
+        )
+
+        vector_store.upsert_chunks(
+            client,
+            [chunk],
+            [[1.0] + [0.0] * 383],
+            filename="shared.txt",
+            file_hash="f" * 64,
+            visibility="tenant_shared",
+        )
+        points, _ = client.scroll(
+            collection_name=vector_store.COLLECTION_NAME,
+            limit=1,
+            with_payload=True,
+        )
+
+        assert points[0].payload["visibility"] == "tenant_shared"
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("search_mode", ["dense", "keyword", "hybrid"])
+@pytest.mark.parametrize(
+    ("role", "expected_ids"),
+    [
+        ("member", {"own-private", "shared"}),
+        ("admin", {"own-private", "shared", "other-private"}),
+    ],
+)
+def test_search_chunks_enforces_role_visibility_and_tenant(
+    tmp_path, search_mode, role, expected_ids
+):
+    client = QdrantClient(path=str(tmp_path / "qdrant"))
+    try:
+        vector_store.create_collection(client)
+        vector = [1.0] + [0.0] * 383
+        records = [
+            ("tenant-a", "user-a", "own-private", "private"),
+            ("tenant-a", "user-b", "shared", "tenant_shared"),
+            ("tenant-a", "user-b", "other-private", "private"),
+            ("tenant-b", "user-b", "foreign-shared", "tenant_shared"),
+        ]
+        points = [
+            models.PointStruct(
+                id=index,
+                vector={vector_store.DENSE_VECTOR_NAME: vector},
+                payload={
+                    "tenant_id": tenant,
+                    "user_id": owner,
+                    "document_id": document_id,
+                    "visibility": visibility,
+                    "text": "shared access control",
+                },
+            )
+            for index, (tenant, owner, document_id, visibility) in enumerate(
+                records, start=1
+            )
+        ]
+        client.upsert(
+            collection_name=vector_store.COLLECTION_NAME,
+            points=points,
+            wait=True,
+        )
+
+        results = vector_store.search_chunks(
+            client=client,
+            query_text="shared access",
+            query_vector=vector,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            role=role,
+            limit=10,
+            search_mode=search_mode,
+        )
+
+        assert {point.payload["document_id"] for point in results} == expected_ids
+    finally:
+        client.close()

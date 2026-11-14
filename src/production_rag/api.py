@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 import hashlib
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 from qdrant_client import QdrantClient
 import shutil
 from tempfile import TemporaryDirectory
@@ -22,6 +22,7 @@ from fastapi import (
     Request,
     File,
     UploadFile,
+    Form,
 )
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ from production_rag.providers import create_answer_providers
 from pydantic import BaseModel, Field
 from production_rag.answering import UNSUPPORTED_ANSWER, answer_question
 from production_rag.answer_cache import BoundedAnswerCache
+
 
 class QuestionRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
@@ -49,7 +51,12 @@ def get_current_identity(
     if not DEV_IDENTITY_ENABLED:
         raise HTTPException(status_code=503, detail="Development identity is disabled.")
 
-    if x_dev_user not in ("user-a", "user-b"):
+    dev_roles = {
+        "user-a": "member",
+        "user-b": "admin",
+    }
+
+    if x_dev_user not in dev_roles:
         raise HTTPException(
             status_code=400,
             detail="X_Dev_User must be user-a or user-b.",
@@ -58,6 +65,7 @@ def get_current_identity(
     return {
         "tenant_id": "dev-tenant",
         "user_id": f"dev-{x_dev_user}",
+        "role": dev_roles[x_dev_user],
     }
 
 
@@ -115,6 +123,11 @@ def process_document_background(
     if not started:
         return
 
+    document = status_store.get_for_user(tenant_id, user_id, document_id)
+    if document is None:
+        return
+    visibility = document["visibility"]
+
     extension = Path(original_filename).suffix.casefold()
 
     try:
@@ -131,6 +144,7 @@ def process_document_background(
                 user_id,
                 document_id=document_id,
                 original_filename=original_filename,
+                visibility=visibility,
             )
 
         if result.document_id != document_id:
@@ -189,6 +203,7 @@ def upload_document(
     background_tasks: BackgroundTasks,
     request: Request,
     file: UploadFile = File(...),
+    visibility: Literal["private", "tenant_shared"] = Form(default="private"),
     identity: dict[str, str] = Depends(get_current_identity),
     storage: UploadStorage = Depends(get_upload_storage),
     status_store: DocumentStatusStore = Depends(get_document_status_store),
@@ -234,6 +249,7 @@ def upload_document(
             original_filename,
             file_hash,
             storage_key,
+            visibility=visibility,
         )
     except Exception:
         storage.delete(storage_key)
@@ -268,9 +284,10 @@ def list_documents(
     identity: dict[str, str] = Depends(get_current_identity),
     status_store: DocumentStatusStore = Depends(get_document_status_store),
 ) -> dict[str, list[dict[str, str | None]]]:
-    documents = status_store.list_for_user(
+    documents = status_store.list_accessible(
         identity["tenant_id"],
         identity["user_id"],
+        identity["role"],
     )
     return {"documents": documents}
 
@@ -283,25 +300,28 @@ def delete_document(
     storage: UploadStorage = Depends(get_upload_storage),
     status_store: DocumentStatusStore = Depends(get_document_status_store),
 ) -> dict[str, str]:
-    document = status_store.get_for_user(
+    document = status_store.get_visible_document(
         identity["tenant_id"],
         identity["user_id"],
+        identity["role"],
         document_id,
     )
-    if document is None:
+    if document is None or (
+        identity["role"] == "member" and document["user_id"] != identity["user_id"]
+    ):
         raise HTTPException(status_code=404, detail="Document not found")
 
     delete_document_chunks(
         request.app.state.qdrant_client,
-        identity["tenant_id"],
-        identity["user_id"],
+        document["tenant_id"],
+        document["user_id"],
         document_id,
     )
 
     storage.delete(document["storage_key"])
     status_store.delete_for_user(
-        identity["tenant_id"],
-        identity["user_id"],
+        document["tenant_id"],
+        document["user_id"],
         document_id,
     )
     return {"document_id": document_id, "status": "deleted"}
@@ -317,6 +337,7 @@ def ask_question(
     ready_document_ids = status_store.ready_document_ids(
         identity["tenant_id"],
         identity["user_id"],
+        identity["role"],
     )
 
     if not ready_document_ids:
@@ -344,6 +365,7 @@ def ask_question(
         question=payload.question,
         tenant_id=identity["tenant_id"],
         user_id=identity["user_id"],
+        role=identity["role"],
         ready_document_ids=ready_document_ids,
         answer_cache=request.app.state.answer_cache,
         document_set_version=status_store.get_document_set_version(

@@ -74,3 +74,19 @@ def test_answer_cache_tracks_hits_and_misses():
         "misses": 1,
         "hit_rate": 0.5,
     }
+
+
+def test_answer_cache_key_uses_visible_document_set():
+    def make_key(document_ids):
+        return answer_cache.make_answer_cache_key(
+            "tenant-a",
+            "user-a",
+            "What is the policy?",
+            "docs-v1",
+            "prompt-v1",
+            "gemini-model",
+            visible_document_ids=document_ids,
+        )
+
+    assert make_key(["doc-a", "doc-b"]) == make_key(["doc-b", "doc-a"])
+    assert make_key(["doc-a", "doc-b"]) != make_key(["doc-a"])

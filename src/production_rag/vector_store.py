@@ -118,6 +118,7 @@ def upsert_chunks(
     vectors: list[list[float]],
     filename: str,
     file_hash: str,
+    visibility: str = "private",
 ) -> None:
     if len(chunks) != len(vectors):
         raise ValueError("Each chunk must have exactly one vector")
@@ -130,6 +131,7 @@ def upsert_chunks(
             source="user_upload",
             filename=filename,
             file_hash=file_hash,
+            visibility=visibility,
         )
         points.append(point)
 
@@ -162,7 +164,7 @@ def create_collection(client: QdrantClient) -> None:
         ),
     )
 
-    for field_name in ("user_id", "document_id", "file_hash", "filename_key", "source"):
+    for field_name in ("user_id", "document_id", "file_hash", "filename_key", "source", "visibility"):
         client.create_payload_index(
             collection_name=COLLECTION_NAME,
             field_name=field_name,
@@ -192,17 +194,18 @@ def search_chunks(
     ready_document_ids: list[str] | None = None,
     limit: int = 5,
     search_mode: str = "hybrid",
+    role: str = "member",
 ) -> list[models.ScoredPoint]:
+    if role not in {"member", "admin"}:
+        raise ValueError("Role must be member or admin")
+
     access_conditions = [
         models.FieldCondition(
             key="tenant_id",
             match=models.MatchValue(value=tenant_id),
         ),
-        models.FieldCondition(
-            key="user_id",
-            match=models.MatchValue(value=user_id),
-        ),
     ]
+
     if ready_document_ids is not None:
         access_conditions.append(
             models.FieldCondition(
@@ -210,8 +213,22 @@ def search_chunks(
                 match=models.MatchAny(any=ready_document_ids),
             )
         )
-
-    access_filter = models.Filter(must=access_conditions)
+    if role == "member":
+        access_filter = models.Filter(
+            must=access_conditions,
+            should=[
+                models.FieldCondition(
+                    key="user_id",
+                    match=models.MatchValue(value=user_id),
+                ),
+                models.FieldCondition(
+                    key="visibility",
+                    match=models.MatchValue(value="tenant_shared"),
+                ),
+            ],
+        )
+    else:
+        access_filter = models.Filter(must=access_conditions)
     if search_mode not in ("dense", "keyword", "hybrid"):
         raise ValueError("Search_mode must be dense, keyword, or hybrid")
 
@@ -268,6 +285,7 @@ def point_for_chunk(
     source: str,
     filename: str | None = None,
     file_hash: str | None = None,
+    visibility: str = "private",
 ) -> models.PointStruct:
     if len(vector) != DENSE_VECTOR_SIZE:
         raise ValueError("Vector has the wrong size")
@@ -290,11 +308,22 @@ def point_for_chunk(
     if source == "user_upload":
         if filename is None or file_hash is None:
             raise ValueError("Uploads need a filename and file hash")
+        
+        if visibility not in {"private", "tenant_shared"}:
+            raise ValueError("Unknown upload visibility")
+        
         payload["filename"] = filename
         payload["filename_key"] = filename.casefold()
         payload["file_hash"] = file_hash
-    elif filename is not None or file_hash is not None:
-        raise ValueError("Benchmark points must not have file-specific fields")
+        payload["visibility"] = visibility
+
+    elif (
+        filename is not None
+        or file_hash is not None
+        or visibility != "private"
+    ):
+        raise ValueError("Benchmark points must not have upload-specific fields")
+
 
     return models.PointStruct(
         id=point_id_for_chunk_id(chunk.chunk_id),

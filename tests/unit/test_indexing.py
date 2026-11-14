@@ -26,8 +26,8 @@ def test_index_chunks_embeds_text_and_saves_matching_chunk(monkeypatch):
         captured["texts"] = texts
         return fake_vectors
 
-    def fake_upsert_chunks(client, chunks, vectors, filename, file_hash):
-        captured["saved"] = (client, chunks, vectors, filename, file_hash)
+    def fake_upsert_chunks(client, chunks, vectors, filename, file_hash, visibility):
+        captured["saved"] = (client, chunks, vectors, filename, file_hash, visibility)
 
     monkeypatch.setattr(indexing, "embed_documents", fake_embed_documents)
     monkeypatch.setattr(indexing, "upsert_chunks", fake_upsert_chunks)
@@ -38,6 +38,7 @@ def test_index_chunks_embeds_text_and_saves_matching_chunk(monkeypatch):
         [chunk],
         filename="shared.txt",
         file_hash="f" * 64,
+        visibility="tenant_shared",
     )
 
     assert captured["texts"] == [chunk.text]
@@ -47,13 +48,14 @@ def test_index_chunks_embeds_text_and_saves_matching_chunk(monkeypatch):
         fake_vectors,
         "shared.txt",
         "f" * 64,
+        "tenant_shared",
     )
 
 
 def test_same_file_twice_skips_second_processing(tmp_path, monkeypatch):
     path = tmp_path / "shared.txt"
     path.write_bytes(b"same raw bytes")
-    state = {"document_id": None, "loads": 0, "indexes": 0}
+    state = {"document_id": None, "loads": 0, "indexes": 0, "visibility": None}
     block = LoadedBlock("Same useful file text.", "whole file")
     base_chunk = Chunk(
         chunk_id="a" * 64,
@@ -84,9 +86,10 @@ def test_same_file_twice_skips_second_processing(tmp_path, monkeypatch):
             )
         ]
 
-    def fake_index(client, chunks, filename, file_hash):
+    def fake_index(client, chunks, filename, file_hash, visibility):
         state["indexes"] += 1
         state["document_id"] = chunks[0].document_id
+        state["visibility"] = visibility
 
     monkeypatch.setattr(
         indexing, "find_document_by_file_hash", fake_find, raising=False
@@ -102,7 +105,12 @@ def test_same_file_twice_skips_second_processing(tmp_path, monkeypatch):
 
     client = object()
     first = indexing.index_document_file(
-        client, path, "tenant-a", "user-a", document_id="doc-1"
+        client,
+        path,
+        "tenant-a",
+        "user-a",
+        document_id="doc-1",
+        visibility="tenant_shared",
     )
     second = indexing.index_document_file(
         client, path, "tenant-a", "user-a", document_id="doc-2"
@@ -113,6 +121,7 @@ def test_same_file_twice_skips_second_processing(tmp_path, monkeypatch):
     assert second.document_id == first.document_id
     assert state["loads"] == 1
     assert state["indexes"] == 1
+    assert state["visibility"] == "tenant_shared"
 
 
 def test_changed_file_with_same_name_replaces_old_chunks(tmp_path, monkeypatch):
@@ -157,6 +166,7 @@ def test_changed_file_with_same_name_replaces_old_chunks(tmp_path, monkeypatch):
             "user-a",
             document_id="new-doc",
             original_filename="shared.txt",
+            visibility="tenant_shared",
         )
 
         points, _ = client.scroll(
@@ -165,7 +175,11 @@ def test_changed_file_with_same_name_replaces_old_chunks(tmp_path, monkeypatch):
             with_payload=True,
             with_vectors=False,
         )
+        new_point = next(
+            point for point in points if point.payload["document_id"] == "new-doc"
+        )
 
+        assert new_point.payload["visibility"] == "tenant_shared"
         assert new.previous_document_id == old.document_id
         assert {point.payload["document_id"] for point in points} == {
             old.document_id,
@@ -348,8 +362,8 @@ def test_indexing_failure_removes_partial_chunks(tmp_path, monkeypatch):
 
         real_upsert = indexing.upsert_chunks
 
-        def write_one_then_fail(client, chunks, vectors, filename, file_hash):
-            real_upsert(client, chunks[:1], vectors[:1], filename, file_hash)
+        def write_one_then_fail(client, chunks, vectors, filename, file_hash, visibility):
+            real_upsert(client, chunks[:1], vectors[:1], filename, file_hash, visibility=visibility)
             raise RuntimeError("simulated indexing failure")
 
         monkeypatch.setattr(indexing, "upsert_chunks", write_one_then_fail)

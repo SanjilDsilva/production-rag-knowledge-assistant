@@ -29,11 +29,19 @@ def test_health_endpoint_returns_ok():
 def test_dev_identity_returns_server_owned_identity(monkeypatch):
     monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
 
-    user_a = api.get_current_identity("user-a")
-    user_b = api.get_current_identity("user-b")
+    member = api.get_current_identity("user-a")
+    admin = api.get_current_identity("user-b")
 
-    assert user_a == {"tenant_id": "dev-tenant", "user_id": "dev-user-a"}
-    assert user_b == {"tenant_id": "dev-tenant", "user_id": "dev-user-b"}
+    assert member == {
+        "tenant_id": "dev-tenant",
+        "user_id": "dev-user-a",
+        "role": "member",
+    }
+    assert admin == {
+        "tenant_id": "dev-tenant",
+        "user_id": "dev-user-b",
+        "role": "admin",
+    }
 
 
 def test_production_refuses_development_identity():
@@ -189,7 +197,13 @@ def test_background_indexing_failure_marks_row_failed(tmp_path, monkeypatch):
     cleanup_calls = []
 
     def fail_indexing(
-        client, path, tenant_id, user_id, document_id, original_filename=None
+        client,
+        path,
+        tenant_id,
+        user_id,
+        document_id,
+        original_filename=None,
+        visibility="private",
     ):
         raise ValueError("example error")
 
@@ -221,16 +235,28 @@ def test_background_worker_marks_ready_before_old_chunk_cleanup(tmp_path, monkey
     store = DocumentStatusStore(tmp_path / "app.db")
     storage_key = storage.save("tenant-a", "doc-1", ".txt", BytesIO(b"new version"))
     store.create_queued(
-        "tenant-a", "user-a", "doc-1", "report.txt", "a" * 64, storage_key
+        "tenant-a",
+        "user-a",
+        "doc-1",
+        "report.txt",
+        "a" * 64,
+        storage_key,
+        visibility="tenant_shared",
     )
 
     index_calls = []
     cleanup_calls = []
 
     def fake_indexing(
-        client, path, tenant_id, user_id, document_id, original_filename=None
+        client,
+        path,
+        tenant_id,
+        user_id,
+        document_id,
+        original_filename=None,
+        visibility="private",
     ):
-        index_calls.append((path.suffix, original_filename, document_id))
+        index_calls.append((path.suffix, original_filename, document_id, visibility))
         return IndexResult(document_id, "indexed", "old-doc")
 
     def record_cleanup(client, tenant_id, user_id, document_id):
@@ -251,41 +277,51 @@ def test_background_worker_marks_ready_before_old_chunk_cleanup(tmp_path, monkey
         storage_key,
     )
 
-    assert index_calls == [(".txt", "report.txt", "doc-1")]
+    assert index_calls == [(".txt", "report.txt", "doc-1", "tenant_shared")]
     assert cleanup_calls == [("old-doc", "ready")]
     assert store.list_for_user("tenant-a", "user-a")[0]["status"] == "ready"
 
 
-def test_list_documents_only_returns_current_users_documents(tmp_path, monkeypatch):
+def test_list_documents_follow_role_and_visibility(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
     monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
 
     with TestClient(api.app) as test_client:
         store = api.app.state.status_store
-        store.create_queued(
-            "dev-tenant", "dev-user-a", "doc-a", "a.txt", "hash-a", "a.txt"
-        )
-        store.create_queued(
-            "dev-tenant", "dev-user-b", "doc-b", "b.txt", "hash-b", "b.txt"
-        )
+        documents = [
+            ("dev-tenant", "dev-user-a", "doc-a", "private"),
+            ("dev-tenant", "dev-user-b", "doc-b", "private"),
+            ("dev-tenant", "dev-user-b", "shared-doc", "tenant_shared"),
+            ("other-tenant", "dev-user-b", "other-tenant-doc", "tenant_shared"),
+        ]
 
-        user_a_response = test_client.get(
-            "/documents",
-            headers={"X_Dev_User": "user-a"},
-        )
-        user_b_response = test_client.get(
-            "/documents",
-            headers={"X_Dev_User": "user-b"},
-        )
+        for tenant_id, user_id, document_id, visibility in documents:
+            store.create_queued(
+                tenant_id,
+                user_id,
+                document_id,
+                f"{document_id}.txt",
+                document_id,
+                f"{document_id}.txt",
+                visibility=visibility,
+            )
 
-    assert user_a_response.status_code == 200
-    assert user_b_response.status_code == 200
-    assert [item["document_id"] for item in user_a_response.json()["documents"]] == [
-        "doc-a"
-    ]
-    assert [item["document_id"] for item in user_b_response.json()["documents"]] == [
-        "doc-b"
-    ]
+        member_response = test_client.get(
+            "/documents", headers={"X_Dev_User": "user-a"}
+        )
+        admin_response = test_client.get("/documents", headers={"X_Dev_User": "user-b"})
+
+    assert member_response.status_code == 200
+    assert admin_response.status_code == 200
+    assert {doc["document_id"] for doc in member_response.json()["documents"]} == {
+        "doc-a",
+        "shared-doc",
+    }
+    assert {doc["document_id"] for doc in admin_response.json()["documents"]} == {
+        "doc-a",
+        "doc-b",
+        "shared-doc",
+    }
 
 
 def test_delete_document_removes_file_chunks_and_status(tmp_path, monkeypatch):
@@ -415,6 +451,26 @@ def test_question_route_reuses_fake_providers(tmp_path, monkeypatch):
             "dev-tenant/doc-1/file.txt",
         )
         store.update_status("dev-tenant", "dev-user-a", "doc-1", "ready")
+        store.create_queued(
+            "dev-tenant",
+            "dev-user-b",
+            "shared-doc",
+            "shared.txt",
+            "shared-hash",
+            "shared.txt",
+            visibility="tenant_shared",
+        )
+        store.update_status("dev-tenant", "dev-user-b", "shared-doc", "ready")
+
+        store.create_queued(
+            "dev-tenant",
+            "dev-user-b",
+            "private-b",
+            "private.txt",
+            "private-hash",
+            "private.txt",
+        )
+        store.update_status("dev-tenant", "dev-user-b", "private-b", "ready")
 
         first = test_client.post(
             "/questions",
@@ -426,11 +482,26 @@ def test_question_route_reuses_fake_providers(tmp_path, monkeypatch):
             headers={"X_Dev_User": "user-a"},
             json={"question": "Second question"},
         )
+        admin_response = test_client.post(
+            "/questions",
+            headers={"X_Dev_User": "user-b"},
+            json={"question": "Admin question"},
+        )
 
     assert first.json()["answer"] == "Fake answer"
     assert second.json()["answer"] == "Fake answer"
+    assert admin_response.json()["answer"] == "Fake answer"
+    assert len(answer_calls) == 3
+    assert answer_calls[0]["role"] == "member"
+    assert set(answer_calls[0]["ready_document_ids"]) == {"doc-1", "shared-doc"}
+    assert answer_calls[2]["role"] == "admin"
+    assert set(answer_calls[2]["ready_document_ids"]) == {
+        "doc-1",
+        "shared-doc",
+        "private-b",
+    }
     assert factory_calls == [("fake-google-key", "fake-groq-key")]
-    assert len(answer_calls) == 2
+    assert len(answer_calls) == 3
     assert answer_calls[0]["primary_provider"] is primary
     assert answer_calls[1]["primary_provider"] is primary
     assert answer_calls[0]["backup_provider"] is backup
@@ -442,3 +513,95 @@ def test_openapi_displays_privacy_notice():
 
     assert "may use submitted text" in description
     assert "only use public or sample documents" in description
+
+
+def test_delete_permissions_obey_role_and_tenant(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
+    cleanup_calls = []
+    monkeypatch.setattr(
+        api,
+        "delete_document_chunks",
+        lambda *arguments: cleanup_calls.append(arguments),
+    )
+
+    with TestClient(api.app) as test_client:
+        storage = api.app.state.upload_storage
+        store = api.app.state.status_store
+        documents = [
+            ("dev-tenant", "dev-user-b", "shared-doc", "tenant_shared"),
+            ("dev-tenant", "dev-user-a", "admin-doc", "private"),
+            ("other-tenant", "dev-user-a", "foreign-doc", "private"),
+        ]
+
+        for tenant_id, owner_id, document_id, visibility in documents:
+            storage_key = storage.save(
+                tenant_id, document_id, ".txt", BytesIO(document_id.encode())
+            )
+            store.create_queued(
+                tenant_id,
+                owner_id,
+                document_id,
+                f"{document_id}.txt",
+                document_id,
+                storage_key,
+                visibility,
+            )
+
+        member_delete = test_client.delete(
+            "/documents/shared-doc", headers={"X_Dev_User": "user-a"}
+        )
+        admin_delete = test_client.delete(
+            "/documents/admin-doc", headers={"X_Dev_User": "user-b"}
+        )
+        cross_tenant_delete = test_client.delete(
+            "/documents/foreign-doc", headers={"X_Dev_User": "user-b"}
+        )
+
+    assert member_delete.status_code == 404
+    assert admin_delete.status_code == 200
+    assert cross_tenant_delete.status_code == 404
+    assert store.get_for_user("dev-tenant", "dev-user-b", "shared-doc") is not None
+    assert store.get_for_user("dev-tenant", "dev-user-a", "admin-doc") is None
+    assert store.get_for_user("other-tenant", "dev-user-a", "foreign-doc") is not None
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0][1:] == ("dev-tenant", "dev-user-a", "admin-doc")
+
+
+def test_upload_saves_visibility_and_defaults_private(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
+    monkeypatch.setattr(api, "process_document_background", lambda *args: None)
+
+    with TestClient(api.app) as test_client:
+        shared = test_client.post(
+            "/documents",
+            headers={"X_Dev_User": "user-a"},
+            files={"file": ("shared.txt", b"shared text", "text/plain")},
+            data={"visibility": "tenant_shared"},
+        )
+        private = test_client.post(
+            "/documents",
+            headers={"X_Dev_User": "user-a"},
+            files={"file": ("private.txt", b"private text", "text/plain")},
+        )
+        invalid = test_client.post(
+            "/documents",
+            headers={"X_Dev_User": "user-a"},
+            files={"file": ("invalid.txt", b"invalid text", "text/plain")},
+            data={"visibility": "public"},
+        )
+
+        store = api.app.state.status_store
+        shared_row = store.get_for_user(
+            "dev-tenant", "dev-user-a", shared.json()["document_id"]
+        )
+        private_row = store.get_for_user(
+            "dev-tenant", "dev-user-a", private.json()["document_id"]
+        )
+
+    assert shared.status_code == 202
+    assert private.status_code == 202
+    assert invalid.status_code == 422
+    assert shared_row["visibility"] == "tenant_shared"
+    assert private_row["visibility"] == "private"

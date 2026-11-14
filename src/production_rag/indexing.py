@@ -30,6 +30,7 @@ def index_chunks(
     chunks: list[Chunk],
     filename: str,
     file_hash: str,
+    visibility: str = "private",
 ) -> None:
     if not chunks:
         return
@@ -42,6 +43,7 @@ def index_chunks(
         vectors,
         filename=filename,
         file_hash=file_hash,
+        visibility=visibility,
     )
 
 
@@ -52,6 +54,7 @@ def index_document_file(
     user_id: str,
     document_id: str,
     original_filename: str | None = None,
+    visibility: str = "private",
 ) -> IndexResult:
     validate_upload_content(path)
     filename = original_filename or path.name
@@ -84,7 +87,7 @@ def index_document_file(
         raise ValueError(f"No chunks created from file: {path}")
 
     try:
-        index_chunks(client, chunks, filename=filename, file_hash=file_hash)
+        index_chunks(client, chunks, filename=filename, file_hash=file_hash, visibility=visibility)
     except Exception:
         delete_document_chunks(client, tenant_id, user_id, document_id)
         raise

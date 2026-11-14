@@ -223,3 +223,98 @@ def test_delete_bumps_only_the_owner_document_set_version(tmp_path):
     assert store.get_document_set_version("tenant-a", "user-a") == "2"
     assert store.get_document_set_version("tenant-a", "user-b") == "0"
     assert store.get_document_set_version("tenant-b", "user-a") == "0"
+
+
+def test_create_queued_saves_visibility_and_defaults_private(tmp_path):
+    store = DocumentStatusStore(tmp_path / "app.db")
+
+    store.create_queued(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        document_id="doc-shared",
+        original_filename="shared.txt",
+        file_hash="hash-shared",
+        storage_key="shared.txt",
+        visibility="tenant_shared",
+    )
+    store.create_queued(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        document_id="doc-private",
+        original_filename="private.txt",
+        file_hash="hash-private",
+        storage_key="private.txt",
+    )
+
+    shared = store.get_for_user("tenant-a", "user-a", "doc-shared")
+    private = store.get_for_user("tenant-a", "user-a", "doc-private")
+
+    assert shared["visibility"] == "tenant_shared"
+    assert private["visibility"] == "private"
+
+
+def test_list_accessible_applies_role_and_tenant_rules(tmp_path):
+    store = DocumentStatusStore(tmp_path / "app.db")
+    documents = [
+        ("tenant-a", "user-a", "own-private", "private"),
+        ("tenant-a", "user-b", "other-shared", "tenant_shared"),
+        ("tenant-a", "user-b", "other-private", "private"),
+        ("tenant-b", "user-b", "other-tenant-shared", "tenant_shared"),
+    ]
+
+    for tenant_id, user_id, document_id, visibility in documents:
+        store.create_queued(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            document_id=document_id,
+            original_filename=f"{document_id}.txt",
+            file_hash=document_id,
+            storage_key=f"{document_id}.txt",
+            visibility=visibility,
+        )
+
+    member_docs = store.list_accessible("tenant-a", "user-a", "member")
+    admin_docs = store.list_accessible("tenant-a", "admin-a", "admin")
+
+    assert {doc["document_id"] for doc in member_docs} == {
+        "own-private",
+        "other-shared",
+    }
+    assert {doc["document_id"] for doc in admin_docs} == {
+        "own-private",
+        "other-shared",
+        "other-private",
+    }
+
+
+def test_ready_document_ids_follow_role_and_tenant(tmp_path):
+    store = DocumentStatusStore(tmp_path / "app.db")
+    documents = [
+        ("tenant-a", "user-a", "own-private", "private"),
+        ("tenant-a", "user-b", "other-shared", "tenant_shared"),
+        ("tenant-a", "user-b", "other-private", "private"),
+        ("tenant-b", "user-b", "foreign-shared", "tenant_shared"),
+    ]
+
+    for tenant_id, user_id, document_id, visibility in documents:
+        store.create_queued(
+            tenant_id,
+            user_id,
+            document_id,
+            f"{document_id}.txt",
+            document_id,
+            f"{document_id}.txt",
+            visibility,
+        )
+        store.update_status(tenant_id, user_id, document_id, "ready")
+
+    member_ids = store.ready_document_ids("tenant-a", "user-a", "member")
+    admin_ids = store.ready_document_ids("tenant-a", "admin-a", "admin")
+
+    assert set(member_ids) == {"own-private", "other-shared"}
+    assert set(admin_ids) == {
+        "own-private",
+        "other-shared",
+        "other-private",
+    }
+    assert store.ready_document_ids("tenant-a", "user-a", "unknown") == []

@@ -16,12 +16,21 @@ def make_answer_cache_key(
     document_set_version: str,
     prompt_version: str,
     model_name: str,
+    visible_document_ids: list[str] | None = None,
 ) -> str:
+    visible_ids = sorted(set(visible_document_ids or []))
+    visible_ids_json = json.dumps(
+        visible_ids,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    visible_ids_hash = hashlib.sha256(visible_ids_json).hexdigest()
+
     key_parts = {
         "tenant_id": tenant_id,
         "user_id": user_id,
         "question": normalize_question(question),
         "document_set_version": document_set_version,
+        "visible_document_ids_hash": visible_ids_hash,
         "prompt_version": prompt_version,
         "model_name": model_name,
     }
@@ -69,10 +78,9 @@ class BoundedAnswerCache:
             self._hits += 1
             return answer
 
-
     def stats(self) -> dict[str, int | float]:
         with self._lock:
-            total= self._hits + self._misses
+            total = self._hits + self._misses
             hit_rate = self._hits / total if total else 0.0
 
             return {
@@ -80,7 +88,6 @@ class BoundedAnswerCache:
                 "misses": self._misses,
                 "hit_rate": hit_rate,
             }
-
 
     def set(self, key: str, answer: str) -> None:
         with self._lock:
