@@ -29,7 +29,12 @@ from uuid import uuid4
 from production_rag.providers import create_answer_providers
 from pydantic import BaseModel, Field
 from production_rag.answering import UNSUPPORTED_ANSWER, answer_question
-from production_rag.answer_cache import BoundedAnswerCache
+from production_rag.answer_cache import (
+    BoundedAnswerCache,
+    CacheBackend,
+    SQLiteCacheBackend,
+    create_cache_backend,
+)
 
 
 class QuestionRequest(BaseModel):
@@ -72,10 +77,19 @@ def get_current_identity(
 DATA_ROOT = Path(os.getenv("RAG_DATA_DIR", "data"))
 
 
+def create_answer_cache() -> CacheBackend[str]:
+    return create_cache_backend(
+        os.getenv("RAG_CACHE_BACKEND", "memory"),
+        namespace="answers",
+        max_entries=256,
+        ttl_seconds=900,
+        database_path=DATA_ROOT / "cache.db"
+    )
+
 def initialize_app_storage(app: FastAPI) -> None:
     app.state.upload_storage = LocalUploadStorage(DATA_ROOT / "uploads")
     app.state.status_store = DocumentStatusStore(DATA_ROOT / "app.db")
-    app.state.answer_cache = BoundedAnswerCache()
+    app.state.answer_cache = create_answer_cache()
     app.state.status_store.reset_processing()
     qdrant_client = QdrantClient(path=str(DATA_ROOT / "qdrant"))
     create_collection(qdrant_client)

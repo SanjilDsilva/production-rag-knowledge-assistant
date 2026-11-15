@@ -67,7 +67,7 @@ RAG means **retrieval-augmented generation**: the app retrieves relevant documen
 | Answering | Gemini primary provider and Groq backup, with timeouts, retries, growing waits, and a friendly unavailable message |
 | Context control | Rank-ordered context selection within a token budget and near-duplicate chunk removal |
 | Citations | Citations are built from retrieved chunk metadata and checked against the retrieved chunks after generation |
-| Answer cache | Bounded in-memory LRU cache with expiration, identity and version based keys, hit-rate counters, and cache-hit audit logging |
+| Cache backends | Bounded memory (default) and SQLite for answer and question-embedding caches; expiry, entry limits, identity and version scoped answer keys, and hit-rate logs |
 | Evaluation | Labeled retrieval cases and Recall@5, MRR@5, and nDCG@5 metrics |
 
 ## Retrieval measurements
@@ -188,7 +188,20 @@ Uploads and Qdrant data are stored locally, and document status is stored in SQL
 
 The current processor uses FastAPI `BackgroundTasks`. That is a simple way to run work after a response, but it is not a durable job queue: a process restart can interrupt a job. A persistent queue and durable object storage are upgrade paths, not features already deployed here.
 
-The answer cache is in memory. Its entries disappear when the app restarts and are not shared by multiple worker processes. A shared cache is the later upgrade path. A separate question-embedding cache is not implemented yet.
+The cache defaults to bounded in-memory storage. For one application worker, this is the simplest choice and was fastest in the local cache-only benchmark. Set `RAG_CACHE_BACKEND=sqlite` to use `data/cache.db`; answer and query-embedding entries use separate namespaces. SQLite uses WAL, expiry cleanup, and an entry limit. The database and its related files are ignored by Git.
+
+### Cache backend benchmark
+
+This local synthetic benchmark performed 1,000 lookups and 1,000 writes per backend. The lookups deliberately alternated between 500 hits and 500 misses, so the 50% hit rate is a test input, not an estimate of real user traffic.
+
+| Backend | Hit rate | Get p50 | Get p95 | Set p50 | Set p95 |
+|---|---:|---:|---:|---:|---:|
+| Memory | 50% | 0.0005 ms | 0.0006 ms | 0.0007 ms | 0.0008 ms |
+| SQLite | 50% | 6.1273 ms | 9.2571 ms | 7.6559 ms | 10.0088 ms |
+
+These are cache-operation timings on the local development machine. They do not include embedding, search, model generation, or end-to-end request latency. Memory remains the default for the initial single-worker setup; SQLite offers same-filesystem sharing at higher measured cache-operation latency.
+
+Deployment host: host undecided (free Docker Spaces appear to need a paid plan). Redis remains a documented later option if multiple hosts need shared cache state. No Redis package or service is installed.
 
 ## Benchmark data and attribution
 
@@ -202,8 +215,6 @@ NIST SP 800-53 and SP 800-61 PDFs are not included in this repository. No confid
 
 This project is intentionally described as a prototype until the remaining work is implemented and measured:
 
-- Add the separate bounded cache for question embeddings and complete cache invalidation/isolation tests.
-- Add behavior tests proving that deleting a source document prevents an old cached answer from being returned, and that users and tenants cannot receive one another's cached answers.
 - Compare context budgeting on and off using answer quality, citation quality, and token usage. Current evaluation measures retrieval quality; it does not yet measure generated answer quality across 50 questions.
 - Add decision records for the major architecture choices and prepare interview notes based on the finished system.
 - Add query abuse checks and attack tests for hidden document instructions, filter bypass attempts, cross-tenant access, and sensitive data in logs. Add real authentication and rate limiting.
@@ -220,7 +231,7 @@ This project is intentionally described as a prototype until the remaining work 
 | SQLite document status | Managed PostgreSQL or another durable relational database |
 | Local Qdrant | A durable Qdrant deployment or another managed vector database |
 | FastAPI `BackgroundTasks` | A persistent worker queue |
-| In-memory cache | A shared cache such as Redis |
+| Memory default / SQLite option | Redis later if multiple hosts need shared cache state |
 
 These are design directions only. This repository does not create cloud resources or deploy to those services.
 

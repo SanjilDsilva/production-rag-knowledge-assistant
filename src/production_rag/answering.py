@@ -10,7 +10,7 @@ from production_rag.citations import (
 )
 
 from production_rag.answer_cache import (
-    BoundedAnswerCache,
+    CacheBackend,
     make_answer_cache_key,
 )
 
@@ -158,7 +158,7 @@ def answer_question(
     tenant_id: str,
     user_id: str,
     ready_document_ids: list[str],
-    answer_cache: BoundedAnswerCache,
+    answer_cache: CacheBackend[str],
     document_set_version: str,
     limit: int = 5,
     search_mode: str = "hybrid",
@@ -280,6 +280,7 @@ def answer_question(
                     "cache_hits": cache_stats["hits"],
                     "cache_misses": cache_stats["misses"],
                     "cache_hit_rate": cache_stats["hit_rate"],
+                    "cache_backend": answer_cache.backend_name,
                 },
             )
 
@@ -310,6 +311,7 @@ def answer_question(
             "cache_hits": cache_stats["hits"],
             "cache_misses": cache_stats["misses"],
             "cache_hit_rate": cache_stats["hit_rate"],
+            "cache_backend": answer_cache.backend_name,
         },
     )
 

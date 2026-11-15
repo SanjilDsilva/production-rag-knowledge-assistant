@@ -1,19 +1,37 @@
 from functools import lru_cache
 from typing import Any
-from collections import OrderedDict
 from hashlib import sha256
-from threading import Lock
+import json
+import os
+from pathlib import Path
+from production_rag.answer_cache import (
+    BoundedAnswerCache,
+    CacheBackend,
+    create_cache_backend,
+)
+import logging
+from time import perf_counter
 
+logger = logging.getLogger(__name__)
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 BATCH_SIZE = 32
 MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 QUERY_CACHE_MAX_ENTRIES = 512
-_query_cache: OrderedDict[str, tuple[float, ...]] = OrderedDict()
-_query_cache_lock = Lock()
-_query_cache_hits = 0
-_query_cache_misses = 0
+
+
+def create_query_cache() -> CacheBackend[list[float]]:
+    return create_cache_backend(
+        os.getenv("RAG_CACHE_BACKEND", "memory"),
+        namespace="query_embeddings",
+        max_entries=QUERY_CACHE_MAX_ENTRIES,
+        ttl_seconds=900,
+        database_path=Path(os.getenv("RAG_DATA_DIR", "data")) / "cache.db",
+    )
+
+
+_query_cache: CacheBackend[list[float]] = create_query_cache()
 
 
 @lru_cache(maxsize=1)
@@ -46,21 +64,36 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
 
 
 def embed_query(question: str) -> list[float]:
-    global _query_cache_hits, _query_cache_misses
-    prefixed_question = f"{QUERY_PREFIX}{question}"
-    cache_key = sha256(prefixed_question.encode("utf-8")).hexdigest()
-    with _query_cache_lock:
-        cached_vector = _query_cache.get(cache_key)
-        if cached_vector is not None:
-            _query_cache.move_to_end(cache_key)
-            _query_cache_hits += 1
-            return list(cached_vector)
-        _query_cache_misses += 1
-    vector = tuple(_encode([prefixed_question])[0])
+    normalized_question = " ".join(question.casefold().split())
+    prefixed_question = f"{QUERY_PREFIX}{normalized_question}"
+    key_parts = {
+        "question": normalized_question,
+        "model_revision": MODEL_REVISION,
+        "query_instruction": QUERY_PREFIX,
+    }
+    cache_key_material = json.dumps(
+        key_parts, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    cache_key = sha256(cache_key_material).hexdigest()
+    lookup_started_at = perf_counter()
+    cached_vector = _query_cache.get(cache_key)
+    cache_lookup_ms = (perf_counter() - lookup_started_at) * 1000
+    cache_stats = _query_cache.stats()
 
-    with _query_cache_lock:
-        _query_cache[cache_key] = vector
-        _query_cache.move_to_end(cache_key)
-        while len(_query_cache) > QUERY_CACHE_MAX_ENTRIES:
-            _query_cache.popitem(last=False)
+    logger.info(
+        "query_embedding_cache_lookup",
+        extra={
+            "cache_backend": _query_cache.backend_name,
+            "cache_hit": cached_vector is not None,
+            "cache_lookup_ms": round(cache_lookup_ms, 4),
+            "cache_hits": cache_stats["hits"],
+            "cache_misses": cache_stats["misses"],
+            "cache_hit_rate": cache_stats["hit_rate"],
+        },
+    )
+    if cached_vector is not None:
+        return list(cached_vector)
+
+    vector = _encode([prefixed_question])[0]
+    _query_cache.set(cache_key, vector)
     return list(vector)

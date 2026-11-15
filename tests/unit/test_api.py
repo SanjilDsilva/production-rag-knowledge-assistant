@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from production_rag.indexing import IndexResult
+import pytest
 
 from production_rag import vector_store
 from production_rag.chunking import Chunk
@@ -605,3 +606,80 @@ def test_upload_saves_visibility_and_defaults_private(tmp_path, monkeypatch):
     assert invalid.status_code == 422
     assert shared_row["visibility"] == "tenant_shared"
     assert private_row["visibility"] == "private"
+
+
+def test_create_answer_cache_defaults_to_memory_and_can_select_sqlite(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
+    monkeypatch.delenv("RAG_CACHE_BACKEND", raising=False)
+
+    memory_cache = api.create_answer_cache()
+    assert isinstance(memory_cache, api.BoundedAnswerCache)
+
+    monkeypatch.setenv("RAG_CACHE_BACKEND", "sqlite")
+    sqlite_cache = api.create_answer_cache()
+
+    assert isinstance(sqlite_cache, api.SQLiteCacheBackend)
+    assert sqlite_cache.database_path == tmp_path / "cache.db"
+
+
+@pytest.mark.parametrize("backend_name", ["memory", "sqlite"])
+def test_delete_then_ask_does_not_return_cached_answer(
+    tmp_path, monkeypatch, backend_name
+):
+    monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
+    monkeypatch.setenv("RAG_CACHE_BACKEND", backend_name)
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake-key")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(
+        api, "create_answer_providers", lambda *args: (object(), object())
+    )
+    monkeypatch.setattr(api, "delete_document_chunks", lambda *args: None)
+    monkeypatch.delattr(api.app.state, "answer_providers", raising=False)
+
+    answer_calls = []
+
+    def fake_answer_question(**arguments):
+        answer_calls.append(True)
+        arguments["answer_cache"].set("old-answer", "Cached answer")
+        return SimpleNamespace(answer="Cached answer", citations=[])
+
+    monkeypatch.setattr(api, "answer_question", fake_answer_question)
+
+    with TestClient(api.app) as test_client:
+        storage = api.app.state.upload_storage
+        store = api.app.state.status_store
+        storage_key = storage.save(
+            "dev-tenant", "doc-1", ".txt", BytesIO(b"source text")
+        )
+        store.create_queued(
+            "dev-tenant",
+            "dev-user-a",
+            "doc-1",
+            "source.txt",
+            "source-hash",
+            storage_key,
+        )
+        store.update_status("dev-tenant", "dev-user-a", "doc-1", "ready")
+
+        first = test_client.post(
+            "/questions",
+            headers={"X_Dev_User": "user-a"},
+            json={"question": "What does the source say?"},
+        )
+        deleted = test_client.delete(
+            "/documents/doc-1", headers={"X_Dev_User": "user-a"}
+        )
+        second = test_client.post(
+            "/questions",
+            headers={"X_Dev_User": "user-a"},
+            json={"question": "What does the source say?"},
+        )
+
+    assert first.json()["answer"] == "Cached answer"
+    assert deleted.status_code == 200
+    assert second.json()["answer"] == api.UNSUPPORTED_ANSWER
+    assert store.get_for_user("dev-tenant", "dev-user-a", "doc-1") is None
+    assert answer_calls == [True]

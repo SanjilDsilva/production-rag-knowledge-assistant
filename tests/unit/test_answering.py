@@ -5,12 +5,25 @@ from production_rag.answering import (
     extract_cited_chunk_ids,
     citations_for_answer,
 )
+import pytest
+from production_rag.answer_cache import BoundedAnswerCache, SQLiteCacheBackend
 
 from production_rag.answer_cache import BoundedAnswerCache
 from production_rag.providers import ProviderResult, ProviderUnavailableError
 import logging
 from production_rag.citations import Citation
 from production_rag import answering
+
+
+@pytest.fixture(params=("memory", "sqlite"))
+def cache_backend(request, tmp_path):
+    if request.param == "memory":
+        return BoundedAnswerCache[str]()
+
+    return SQLiteCacheBackend[str](
+        tmp_path / "cache.db",
+        namespace="answers",
+    )
 
 
 def test_prompt_keeps_rules_separate_from_untrusted_document_text():
@@ -168,6 +181,10 @@ def test_answer_question_returns_verified_source(monkeypatch, caplog):
         for record in caplog.records
         if record.message == "context_budget_applied"
     )
+    cache_log = next(
+        record for record in caplog.records if record.message == "answer_cache_lookup"
+    )
+    assert cache_log.cache_backend == "memory"
     assert budget_log.prompt_tokens_before == 80
     assert budget_log.prompt_tokens_after == 35
     assert "What does the policy require?" not in caplog.text
@@ -322,7 +339,9 @@ def test_answer_question_reuses_cached_answer(monkeypatch):
     assert len(provider_calls) == 1
 
 
-def test_answer_question_refreshes_after_shared_document_is_removed(monkeypatch):
+def test_answer_question_refreshes_after_shared_document_is_removed(
+    monkeypatch, cache_backend
+):
     shared_id = "a" * 64
     private_id = "b" * 64
 
@@ -371,7 +390,6 @@ def test_answer_question_refreshes_after_shared_document_is_removed(monkeypatch)
         return ProviderResult(text=next(answers))
 
     monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
-    cache = BoundedAnswerCache()
 
     def ask(document_ids):
         return answering.answer_question(
@@ -383,7 +401,7 @@ def test_answer_question_refreshes_after_shared_document_is_removed(monkeypatch)
             user_id="user-a",
             role="member",
             ready_document_ids=document_ids,
-            answer_cache=cache,
+            answer_cache=cache_backend,
             document_set_version="unchanged-owner-version",
         )
 
@@ -395,7 +413,7 @@ def test_answer_question_refreshes_after_shared_document_is_removed(monkeypatch)
     assert len(provider_calls) == 2
 
 
-def test_answer_cache_is_separate_between_users_and_tenants(monkeypatch):
+def test_answer_cache_is_separate_between_users_and_tenants(monkeypatch, cache_backend):
     chunk_ids = {
         "doc-a": "a" * 64,
         "doc-b": "b" * 64,
@@ -441,7 +459,6 @@ def test_answer_cache_is_separate_between_users_and_tenants(monkeypatch):
         return ProviderResult(text=next(answers))
 
     monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
-    cache = BoundedAnswerCache()
 
     def ask(tenant_id, user_id, document_id):
         return answering.answer_question(
@@ -452,7 +469,7 @@ def test_answer_cache_is_separate_between_users_and_tenants(monkeypatch):
             tenant_id=tenant_id,
             user_id=user_id,
             ready_document_ids=[document_id],
-            answer_cache=cache,
+            answer_cache=cache_backend,
             document_set_version="version-1",
         )
 
@@ -519,4 +536,61 @@ def test_answer_question_does_not_cache_provider_failure(monkeypatch):
     assert failed.answer == "Temporary provider failure"
     assert succeeded.answer == generated_answer
     assert cached_success == succeeded
+    assert len(provider_calls) == 2
+
+
+def test_answer_question_does_not_cache_unsupported_citation(monkeypatch):
+    chunk_id = "a" * 64
+    chunk = SimpleNamespace(
+        payload={
+            "chunk_id": chunk_id,
+            "filename": "policy.txt",
+            "location": "page 1",
+            "text": "The policy requires approval.",
+        }
+    )
+    answers = iter(
+        [
+            f"Unsupported claim [{'b' * 64}].",
+            f"Approval is required [{chunk_id}].",
+        ]
+    )
+    provider_calls = []
+
+    monkeypatch.setattr(answering, "embed_query", lambda question: [0.0] * 384)
+    monkeypatch.setattr(answering, "search_chunks", lambda **kwargs: [chunk])
+    monkeypatch.setattr(answering, "estimate_prompt_tokens", lambda messages: 20)
+    monkeypatch.setattr(
+        answering,
+        "select_chunks_within_context_budget",
+        lambda retrieved, limit: retrieved,
+    )
+
+    def fake_generate(**kwargs):
+        provider_calls.append(True)
+        return ProviderResult(text=next(answers))
+
+    monkeypatch.setattr(answering, "generate_with_fallback", fake_generate)
+    cache = BoundedAnswerCache()
+
+    def ask():
+        return answering.answer_question(
+            qdrant_client=object(),
+            primary_provider=object(),
+            backup_provider=object(),
+            question="What approval is required?",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            ready_document_ids=["doc-1"],
+            answer_cache=cache,
+            document_set_version="version-1",
+        )
+
+    unsupported = ask()
+    valid = ask()
+    cached_valid = ask()
+
+    assert unsupported.answer == answering.UNSUPPORTED_ANSWER
+    assert valid.answer == "Approval is required [" + chunk_id + "]."
+    assert cached_valid == valid
     assert len(provider_calls) == 2
