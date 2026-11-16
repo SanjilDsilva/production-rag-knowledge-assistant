@@ -215,7 +215,7 @@ NIST SP 800-53 and SP 800-61 PDFs are not included in this repository. No confid
 
 This project is intentionally described as a prototype until the remaining work is implemented and measured:
 
-- Compare context budgeting on and off using answer quality, citation quality, and token usage. Current evaluation measures retrieval quality; it does not yet measure generated answer quality across 50 questions.
+- Context-budget probe: for one question, a 500-token BGE-based limit reduced the estimated prompt from 769 to 506 tokens. Both budget-on and budget-off runs had 0 relevant citations; Gemini returned server errors and the fallback did not produce a relevant citation. This is an exploratory token-saving result, not evidence that answer or citation quality is preserved. A larger, reliable comparison remains unfinished.
 - Add decision records for the major architecture choices and prepare interview notes based on the finished system.
 - Add query abuse checks and attack tests for hidden document instructions, filter bypass attempts, cross-tenant access, and sensitive data in logs. Add real authentication and rate limiting.
 - Add `/ready`, `/metrics`, and `/version`, then add CI checks for tests, retrieval evaluation, linting, types, and dependency security.

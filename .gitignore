@@ -13,3 +13,4 @@ data/app.db
 data/app.db-wal
 data/app.db-shm
 data/cache.db*
+/tmp_resume_page-1.png

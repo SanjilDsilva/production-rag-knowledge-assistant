@@ -164,6 +164,7 @@ def answer_question(
     search_mode: str = "hybrid",
     role: str = "member",
     apply_context_budget: bool = True,
+    context_token_limit: int | None = None,
 ) -> AnswerResult:
     if not question.strip():
         raise ValueError("Question cannot be empty")
@@ -212,7 +213,8 @@ def answer_question(
     messages_before = build_messages(question, retrieved_chunks)
     prompt_tokens_before = estimate_prompt_tokens(messages_before)
     config = load_llm_config()
-    context_token_limit = config["limits"]["context_tokens"]
+    if context_token_limit is None:
+        context_token_limit = config["limits"]["context_tokens"]
 
     context_started_at = time.perf_counter()
     if apply_context_budget:
