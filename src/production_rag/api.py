@@ -28,7 +28,13 @@ from uuid import uuid4
 
 from production_rag.providers import create_answer_providers
 from pydantic import BaseModel, Field
-from production_rag.answering import UNSUPPORTED_ANSWER, answer_question
+from production_rag.answering import (
+    UNSUPPORTED_ANSWER,
+    answer_question,
+    log_answer_audit,
+)
+from production_rag.query_security import is_suspicious_query
+from production_rag.rate_limit import FixedWindowRateLimiter
 from production_rag.answer_cache import (
     BoundedAnswerCache,
     CacheBackend,
@@ -99,6 +105,10 @@ def initialize_app_storage(app: FastAPI) -> None:
     app.state.upload_storage = LocalUploadStorage(DATA_ROOT / "uploads")
     app.state.status_store = DocumentStatusStore(DATA_ROOT / "app.db")
     app.state.answer_cache = create_answer_cache()
+    app.state.question_rate_limiter = FixedWindowRateLimiter(
+        max_requests=10,
+        window_seconds=60,
+    )
     app.state.status_store.reset_processing()
     qdrant_client = create_qdrant_client()
     create_collection(qdrant_client)
@@ -357,6 +367,32 @@ def ask_question(
     identity: dict[str, str] = Depends(get_current_identity),
     status_store: DocumentStatusStore = Depends(get_document_status_store),
 ) -> dict[str, object]:
+    if not request.app.state.question_rate_limiter.allow(
+        identity["tenant_id"],
+        identity["user_id"],
+    ):
+        log_answer_audit(
+            identity["tenant_id"],
+            identity["user_id"],
+            [],
+            "rate_limited",
+            False,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Too many questions. Please wait before trying again.",
+        )
+    if is_suspicious_query(payload.question):
+        log_answer_audit(
+            identity["tenant_id"],
+            identity["user_id"],
+            [],
+            "blocked_suspicious_query",
+            False,
+        )
+        raise HTTPException(
+            status_code=400, detail="Question was blocked by safety checks."
+        )
     ready_document_ids = status_store.ready_document_ids(
         identity["tenant_id"],
         identity["user_id"],

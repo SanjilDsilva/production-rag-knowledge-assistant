@@ -598,3 +598,41 @@ def test_answer_question_does_not_cache_unsupported_citation(monkeypatch):
     assert valid.answer == "Approval is required [" + chunk_id + "]."
     assert cached_valid == valid
     assert len(provider_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("alice@example.com", "[REDACTED_EMAIL]"),
+        ("Call me at +1 (555) 123-4567", "Call me at [REDACTED_NUMBER]"),
+        ("Account 123456789012", "Account [REDACTED_NUMBER]"),
+        ("dev-user-a", "dev-user-a"),
+    ],
+)
+def test_mask_sensitive_log_value(value, expected):
+    assert answering.mask_sensitive_log_value(value) == expected
+
+
+def test_answer_audit_masks_sensitive_values(caplog):
+    caplog.set_level(logging.INFO, logger="production_rag.audit")
+
+    answering.log_answer_audit(
+        tenant_id="tenant@example.com",
+        user_id="user-a",
+        document_ids=[
+            "Account 123456789012",
+            "Call me at +1 (555) 123-4567",
+        ],
+        decision="answered",
+        cache_hit=False,
+    )
+
+    audit_record = next(
+        record for record in caplog.records if record.message == "question_audit"
+    )
+    assert audit_record.tenant_id == "[REDACTED_EMAIL]"
+    assert audit_record.user_id == "user-a"
+    assert audit_record.document_ids == [
+        "Account [REDACTED_NUMBER]",
+        "Call me at [REDACTED_NUMBER]",
+    ]

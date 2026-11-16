@@ -22,6 +22,11 @@ jobs:
       - name: Install Python
         run: uv python install 3.12
 
+      - name: Cache pinned BGE model
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface/hub
+          key: bge-small-en-v1.5-${{ runner.os }}-5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
       - name: Install project dependencies
         run: uv sync --locked
 
@@ -29,3 +34,8 @@ jobs:
         env:
             PYTHONPATH: src
         run: uv run --no-sync python -m pytest tests/unit -q
+
+      - name: Run retrieval regression gate
+        env:
+          PYTHONPATH: src
+        run: uv run --no-sync python scripts/evaluate_retrieval_ci_fixture.py

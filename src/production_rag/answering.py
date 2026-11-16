@@ -43,6 +43,20 @@ logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("production_rag.audit")
 
 
+def mask_sensitive_log_value(value: str) -> str:
+    value = re.sub(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        "[REDACTED_EMAIL]",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"(?<!\d)\+?\d(?:[\s().-]*\d){7,}(?!\d)",
+        "[REDACTED_NUMBER]",
+        value,
+    )
+
+
 def log_answer_audit(
     tenant_id: str,
     user_id: str,
@@ -53,9 +67,11 @@ def log_answer_audit(
     audit_logger.info(
         "question_audit",
         extra={
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "document_ids": document_ids,
+            "tenant_id": mask_sensitive_log_value(tenant_id),
+            "user_id": mask_sensitive_log_value(user_id),
+            "document_ids": [
+                mask_sensitive_log_value(document_id) for document_id in document_ids
+            ],
             "decision": decision,
             "cache_hit": cache_hit,
         },

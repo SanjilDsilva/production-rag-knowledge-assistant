@@ -91,24 +91,7 @@ def test_load_evaluation_cases_reads_labeled_questions():
 
     cases = load_evaluation_cases(fixture_path)
 
-    assert len(cases) == 3
-    assert cases[0].category == "exact_word"
-    assert cases[0].answerable is True
-    assert cases[0].relevant_chunk_ids == {
-        "4ffb0e579b638a1d44e3747c1709b1118d0d811e11bb2b8750ee15477e347590"
-    }
-    assert cases[2].category == "multi_document"
-    assert len(cases[2].relevant_chunk_ids) == 3
-
-
-def test_load_evaluation_cases_reads_labeled_questions():
-    fixture_path = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "retrieval_eval.jsonl"
-    )
-
-    cases = load_evaluation_cases(fixture_path)
-
-    assert len(cases) >= 4
+    assert len(cases) >= 50
     assert cases[0].category == "exact_word"
     assert cases[0].answerable is True
     assert cases[0].relevant_chunk_ids == {
@@ -121,7 +104,7 @@ def test_load_evaluation_cases_reads_labeled_questions():
     assert cases[3].relevant_chunk_ids == set()
 
 
-def test_retrieval_runner_scores_search_results(monkeypatch):
+def test_retrieval_runner_scores_search_results(monkeypatch, capsys):
     cases = [
         EvaluationCase(
             question="exact question",
@@ -158,6 +141,7 @@ def test_retrieval_runner_scores_search_results(monkeypatch):
         user_id="user-a",
         k=3,
         search_mode="dense",
+        verbose=True,
     )
 
     assert metrics == {
@@ -168,6 +152,9 @@ def test_retrieval_runner_scores_search_results(monkeypatch):
     assert len(search_calls) == 2
     assert all(call["tenant_id"] == "tenant-a" for call in search_calls)
     assert all(call["user_id"] == "user-a" for call in search_calls)
+    output = capsys.readouterr().out
+    assert "question='exact question'" in output
+    assert "question='paraphrased question'" in output
 
 
 LOCAL_QDRANT_DIR = Path(__file__).resolve().parents[2] / "qdrant_storage"

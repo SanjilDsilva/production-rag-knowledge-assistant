@@ -230,7 +230,7 @@ def run_retrieval_evaluation(
 
         if verbose:
             print(
-                f"{case.category}: "
+                f"{case.category}: question={case.question!r} "
                 f"expected={sorted(case.relevant_chunk_ids)}"
                 f"retrieved={retrieved_ids}"
             )

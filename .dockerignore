@@ -1,0 +1,14 @@
+.git/
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+data/
+qdrant_storage/
+tmp_resume_page-1.png
+tests/
+notebooks/
+scripts/
+docs/

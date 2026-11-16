@@ -1,0 +1,14 @@
+{
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "embedding_model_revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+  "vector_size": 384,
+  "vectors_normalized": true,
+  "chunker_version": "recursive-v1-size-380-overlap-50",
+  "chunk_count": 356,
+  "source_manifest_sha256": "a4e2a2d1035c17c6d53d00b8b526329affe44286a2743fbb0c2ab6a2e6116723",
+  "evaluation_file_sha256": "ad849c17cad8ead67919d7eced1d284f98c5cd1f3624c1ae1786b0bcf0f77a71",
+  "files": {
+    "vectors.npy": "5dc0a3a7b45bbb81a53f24c081888144a568a4c59f89b1b5689c3e8192aea961",
+    "chunks.jsonl": "1864d5cde7d5f604e98a557fd206d3d2ac072de1a66ae9373b7089a280ef8ee5"
+  }
+}
