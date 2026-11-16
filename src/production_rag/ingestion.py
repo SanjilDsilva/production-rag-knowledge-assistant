@@ -131,7 +131,7 @@ def load_pdf_file(path: Path) -> list[LoadedBlock]:
     return blocks
 
 
-def load_word_file(path: Path) -> list(LoadedBlock):
+def load_word_file(path: Path) -> list[LoadedBlock]:
     document = Document(path)
     blocks = []
     paragraph_number = 0
@@ -175,7 +175,7 @@ def load_word_file(path: Path) -> list(LoadedBlock):
     return blocks
 
 
-def load_document(path: Path) -> list(LoadedBlock):
+def load_document(path: Path) -> list[LoadedBlock]:
 
     try:
         suffix = path.suffix.lower()
