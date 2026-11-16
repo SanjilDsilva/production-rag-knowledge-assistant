@@ -92,7 +92,10 @@ def test_citations_for_answer_rejects_unknown_chunk_id():
     assert citations is None
 
 
-def test_answer_question_returns_verified_source(monkeypatch, caplog):
+@pytest.mark.parametrize("apply_context_budget", [True, False])
+def test_answer_question_returns_verified_source(
+    monkeypatch, caplog, apply_context_budget
+):
     chunk_id = "a" * 64
     retrieved_chunk = SimpleNamespace(
         payload={
@@ -154,6 +157,7 @@ def test_answer_question_returns_verified_source(monkeypatch, caplog):
         answer_cache=BoundedAnswerCache(),
         document_set_version="docs-v1",
         role="admin",
+        apply_context_budget=apply_context_budget,
     )
 
     assert result.answer == generated_answer
@@ -175,7 +179,7 @@ def test_answer_question_returns_verified_source(monkeypatch, caplog):
     assert all(record.elapsed_ms >= 0 for record in stage_logs)
     assert stage_logs[1].fusion_included is True
     assert stage_logs[1].reranker_used is False
-    assert selected_budgets == [3000]
+    assert selected_budgets == ([3000] if apply_context_budget else [])
     budget_log = next(
         record
         for record in caplog.records

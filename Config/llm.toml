@@ -1,5 +1,5 @@
 [models]
-primary = "gemini-3.6-flash"
+primary = "gemini-3.8-flash"
 backup = "openai/gpt-oss-20b"
 
 [limits]

@@ -72,6 +72,22 @@ def test_startup_prepares_local_storage_and_status_store(tmp_path, monkeypatch):
         )
 
 
+def test_create_qdrant_client_uses_server_url(monkeypatch):
+    client_options = {}
+
+    def fake_qdrant_client(**options):
+        client_options.update(options)
+        return object()
+
+    monkeypatch.setattr(api, "QdrantClient", fake_qdrant_client)
+    monkeypatch.setenv("QDRANT_URL", "http://localhost:6333")
+
+    client = api.create_qdrant_client()
+
+    assert client is not None
+    assert client_options == {"url": "http://localhost:6333"}
+
+
 def test_hash_upload_file_hashes_and_rewinds():
     content = BytesIO(b"hello")
 

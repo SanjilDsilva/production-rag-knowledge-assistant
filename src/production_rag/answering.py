@@ -163,6 +163,7 @@ def answer_question(
     limit: int = 5,
     search_mode: str = "hybrid",
     role: str = "member",
+    apply_context_budget: bool = True,
 ) -> AnswerResult:
     if not question.strip():
         raise ValueError("Question cannot be empty")
@@ -214,10 +215,14 @@ def answer_question(
     context_token_limit = config["limits"]["context_tokens"]
 
     context_started_at = time.perf_counter()
-    selected_chunks = select_chunks_within_context_budget(
-        retrieved_chunks,
-        context_token_limit,
-    )
+    if apply_context_budget:
+        selected_chunks = select_chunks_within_context_budget(
+            retrieved_chunks,
+            context_token_limit,
+        )
+    else:
+        selected_chunks = retrieved_chunks
+
     log_answer_stage_timing("context_selection", context_started_at)
     if not selected_chunks:
         logger.info(

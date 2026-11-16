@@ -83,15 +83,24 @@ def create_answer_cache() -> CacheBackend[str]:
         namespace="answers",
         max_entries=256,
         ttl_seconds=900,
-        database_path=DATA_ROOT / "cache.db"
+        database_path=DATA_ROOT / "cache.db",
     )
+
+
+def create_qdrant_client() -> QdrantClient:
+    qdrant_url = os.getenv("QDRANT_URL")
+    if qdrant_url:
+        return QdrantClient(url=qdrant_url)
+
+    return QdrantClient(path=str(DATA_ROOT / "qdrant"))
+
 
 def initialize_app_storage(app: FastAPI) -> None:
     app.state.upload_storage = LocalUploadStorage(DATA_ROOT / "uploads")
     app.state.status_store = DocumentStatusStore(DATA_ROOT / "app.db")
     app.state.answer_cache = create_answer_cache()
     app.state.status_store.reset_processing()
-    qdrant_client = QdrantClient(path=str(DATA_ROOT / "qdrant"))
+    qdrant_client = create_qdrant_client()
     create_collection(qdrant_client)
     app.state.qdrant_client = qdrant_client
 

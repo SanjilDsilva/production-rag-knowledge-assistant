@@ -146,6 +146,9 @@ def generate_with_retries(
                     "attempt": attempt,
                     "elapsed_ms": round(elapsed_ms, 2),
                     "error_type": type(error).__name__,
+                    "status_code": getattr(
+                        error, "status_code", getattr(error, "code", None)
+                    ),
                 },
             )
             if not is_temporary_provider_error(error) or attempt == attempts:
@@ -196,6 +199,9 @@ def generate_with_fallback(
                 extra={
                     "provider": type(provider).__name__,
                     "error_type": type(error).__name__,
+                    "status_code": getattr(
+                        error, "status_code", getattr(error, "code", None)
+                    ),
                 },
             )
 
