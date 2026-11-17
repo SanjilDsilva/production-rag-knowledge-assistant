@@ -27,6 +27,9 @@ def _chunk_from_record(record: dict[str, Any]) -> Chunk:
 
 
 def sha256_file(path: Path) -> str:
+    if path.suffix == ".jsonl":
+        text = path.read_text(encoding="utf-8")
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
     digest = hashlib.sha256()
 
     with path.open("rb") as file:
