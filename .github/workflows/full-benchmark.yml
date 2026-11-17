@@ -1,0 +1,79 @@
+name: Full benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-benchmark:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: src
+      QDRANT_URL: http://127.0.0.1:6333
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.20.1
+        ports:
+          - 6333:6333
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Cache pinned BGE model
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface/hub
+          key: bge-small-en-v1.5-${{ runner.os }}-5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+
+      - name: Install locked project dependencies
+        run: uv sync --locked
+
+      - name: Download full benchmark release
+        run: |
+          mkdir -p data/benchmark
+          curl --fail --location \
+            --output /tmp/production-rag-benchmark-v1.zip \
+            https://github.com/SanjilDsilva/production-rag-knowledge-assistant/releases/download/benchmark-v1/production-rag-benchmark-v1.zip
+          unzip -q /tmp/production-rag-benchmark-v1.zip -d data/benchmark
+
+      - name: Wait for Qdrant
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:6333/healthz > /dev/null; then
+              echo "Qdrant is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant did not become ready" >&2
+          exit 1
+
+      - name: Verify and import benchmark into Qdrant
+        run: |
+          uv run --no-sync python -c '
+          import os
+          from pathlib import Path
+          from qdrant_client import QdrantClient
+          from production_rag.benchmark_data import import_benchmark_artifacts
+
+          client = QdrantClient(url=os.environ["QDRANT_URL"])
+          try:
+              count = import_benchmark_artifacts(client, Path("data/benchmark"))
+              print(f"imported_points={count}")
+          finally:
+              client.close()
+          '
+
+      - name: Evaluate 50 questions on the full benchmark
+        run: uv run --no-sync python scripts/evaluate_qdrant_server.py
