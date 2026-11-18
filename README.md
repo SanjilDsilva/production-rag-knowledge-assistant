@@ -86,7 +86,18 @@ The following retrieval ablation was measured on a local Qdrant collection conta
 
 **Qdrant server timing (hybrid search):** On the local development machine, search p50 was **9.80 ms** and p95 was **32.50 ms**, measured across 141 sequential requests from 47 unique answerable questions (three timed rounds per question). Query vectors were computed before timing, and a warm-up search per question was excluded. These are search-call timings only; they exclude embedding, answer generation, citation validation, and API overhead. The 47-question sample is small and does not demonstrate end-to-end latency.
 
-**Single-run answer-path measurement (Groq):** One sequential run processed 50 labeled questions (47 answerable and 3 unanswerable). It recorded 0 provider failures, 0 rate limits, an acceptable citation for 45/47 answerable questions, and all citations acceptable for 43/47. End-to-end p50/p95 was **908.27/2,045.55 ms**. This measurement includes question embedding, retrieval, generation, and citation handling, but it is one low-load run, not a load test or proof of the 2.5-second target. It was collected before the latest citation parsing and prompt-label ordering fixes; rerun it before treating its answer-quality numbers as current.
+**Groq answer and citation checks:** Two sequential runs used the same 50 questions (47 answerable and 3 unanswerable). Results can vary with free-provider limits and model output; they are measurements, not quality guarantees.
+
+| Run | Provider-success rows | Rate-limit events | At least one acceptable citation | All citations acceptable | All gold chunks cited | Mean gold-chunk coverage | Fallback / degraded |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 50/50 | 0 | 47/47 | 47/47 | 47/47 | 1.000 | 0 / 0 |
+| 2 | 49/50 | 11 | 46/47 | 44/47 | 46/47 | 0.979 | 0 / 0 |
+
+A provider-success row means at least one provider call succeeded for that question. “All citations acceptable” checks every cited chunk against the manually reviewed supporting-chunk set. Gold-chunk results are a separate, stricter comparison.
+
+The answer path now shares a configurable 15-second deadline across provider calls, retries, fallback, and citation retry. If it expires, the app returns retrieved passages with citations in degraded mode. A fake slow-provider test verifies this behavior.
+
+The older end-to-end p50/p95 measurement of 908.27/2,045.55 ms predates the latest citation and prompt changes. The newer diagnostics do not store per-question end-to-end timing, so that number is not a current latency result.
 
 **How to read this table:** Recall measures whether relevant chunks appear in the top five. MRR rewards finding the first relevant chunk near the top. nDCG rewards ranking several relevant chunks well. p50 is the middle measured time; p95 is the time that 95% of these measured searches finished within.
 
@@ -233,7 +244,7 @@ Retrieval scores are calculated over the **47 answerable questions**; the three 
 | Keyword | 0.993 / 0.947 / 0.953 | 0.973 / 0.927 / 0.933 |
 | Hybrid | 0.975 / 0.901 / 0.903 | 0.955 / 0.881 / 0.883 |
 
-The 0.02 margin is an absolute allowance of two percentage points for small ranking variation while still catching meaningful regressions. The local gate passed. GitHub Actions has not yet been verified for this latest workflow change. This gate checks retrieval ranking only; it does not grade generated answer quality, citation correctness, security, or end-to-end latency.
+The 0.02 margin is an absolute allowance of two percentage points for small ranking variation while still catching meaningful regressions. The local gate passed, and GitHub Actions passed the unit-test and retrieval-gate jobs on commit f6bf449. This gate checks retrieval ranking only; it does not grade generated answer quality, citation correctness, security, or end-to-end latency.
 
 ## What is still to do
 
