@@ -86,6 +86,8 @@ The following retrieval ablation was measured on a local Qdrant collection conta
 
 **Qdrant server timing (hybrid search):** On the local development machine, search p50 was **9.80 ms** and p95 was **32.50 ms**, measured across 141 sequential requests from 47 unique answerable questions (three timed rounds per question). Query vectors were computed before timing, and a warm-up search per question was excluded. These are search-call timings only; they exclude embedding, answer generation, citation validation, and API overhead. The 47-question sample is small and does not demonstrate end-to-end latency.
 
+**Single-run answer-path measurement (Groq):** One sequential run processed 50 labeled questions (47 answerable and 3 unanswerable). It recorded 0 provider failures, 0 rate limits, an acceptable citation for 45/47 answerable questions, and all citations acceptable for 43/47. End-to-end p50/p95 was **908.27/2,045.55 ms**. This measurement includes question embedding, retrieval, generation, and citation handling, but it is one low-load run, not a load test or proof of the 2.5-second target. It was collected before the latest citation parsing and prompt-label ordering fixes; rerun it before treating its answer-quality numbers as current.
+
 **How to read this table:** Recall measures whether relevant chunks appear in the top five. MRR rewards finding the first relevant chunk near the top. nDCG rewards ranking several relevant chunks well. p50 is the middle measured time; p95 is the time that 95% of these measured searches finished within.
 
 **Local-mode measurement limit:** The timings in the table above are Qdrant local-mode search calls. They exclude query embedding, answer generation, citation checking, network calls, and end-to-end API time. There were 46 warmed timing samples per mode after one warm-up call. These local-mode numbers do **not** prove the 2.5-second end-to-end p95 goal.
@@ -175,7 +177,7 @@ uv run --no-sync python -m pytest tests/unit -q
 Remove-Item Env:PYTHONPATH
 ```
 
-The last reported full local run passed **175 tests**. After that run, the retrieval-gate failure diagnostic was changed and its focused test passed; the 356-chunk retrieval gate also passed locally. The full suite has not been rerun after those later changes. Two opt-in benchmark integration tests were skipped in the earlier full run. A local Qdrant warning about payload indexes is expected: those indexes are useful with Qdrant server, while local mode does not use them in the same way.
+The last reported full local run passed **175 tests**. After that run, focused tests for citation parsing and label ordering, settings, and provider benchmark diagnostics passed (**41 tests**); the full suite has not been rerun after those changes. The 356-chunk retrieval gate passed locally. Two opt-in benchmark integration tests were skipped in the earlier full run. A local Qdrant warning about payload indexes is expected: those indexes are useful with Qdrant server, while local mode does not use them in the same way.
 
 ## Privacy and security
 
@@ -237,7 +239,7 @@ The 0.02 margin is an absolute allowance of two percentage points for small rank
 
 This project is intentionally described as a prototype until the remaining work is implemented and measured:
 
-- Context-budget probe: for one question, a 500-token BGE-based limit reduced the estimated prompt from 769 to 506 tokens. Both budget-on and budget-off runs had 0 relevant citations; Gemini returned server errors and the fallback did not produce a relevant citation. This is an exploratory token-saving result, not evidence that answer or citation quality is preserved. A larger, reliable comparison remains unfinished.
+- Context-budget retrieval comparison: across 50 questions (47 answerable), a 750-token selection limit reduced the average estimated prompt from 863.2 to 744.0 tokens while measured gold-chunk recall remained 0.993, with zero evidence-loss cases in that run. This is retrieval-only evidence from one run; answer-quality preservation under the budget has not been established.
 - Add decision records for the major architecture choices and prepare interview notes based on the finished system.
 - Run a manual full-benchmark evaluation from the public release asset in a Qdrant service job; verify the asset checksums in that workflow. Keep answer-quality evaluation separate from retrieval ranking.
 - Add `/ready`, `/metrics`, and `/version`, plus lint, type-check, and dependency-security CI checks. The current workflow runs unit tests and the small retrieval gate only.
