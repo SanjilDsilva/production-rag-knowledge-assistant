@@ -14,3 +14,6 @@ data/app.db-wal
 data/app.db-shm
 data/cache.db*
 /tmp_resume_page-1.png
+/data/provider_call_timings*.jsonl
+/data/provider_answer_diagnostics*.jsonl
+/data/provider_support_review.csv

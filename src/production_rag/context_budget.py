@@ -86,7 +86,7 @@ def select_chunks_within_context_budget(
         chunk_tokens = count_tokens(context_text, tokenizer)
 
         if tokens_used + chunk_tokens > max_context_tokens:
-            break
+            continue
 
         selected_chunks.append(chunk)
         tokens_used += chunk_tokens

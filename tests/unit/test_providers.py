@@ -7,7 +7,9 @@ from production_rag.providers import (
     generate_with_retries,
     generate_with_fallback,
     ProviderUnavailableError,
+    RetryWaitBudget,
     create_answer_providers,
+    safe_rate_limit_headers,
 )
 from types import SimpleNamespace
 import logging
@@ -73,10 +75,24 @@ def test_gemini_provider_returns_answer_and_token_counts():
     assert client.request["config"].system_instruction == "Use only retrieved sources."
 
 
+def test_gemini_provider_uses_remaining_request_timeout():
+    client = FakeGeminiClient()
+    provider = GeminiAnswerProvider(client, "test-model", 64)
+
+    provider.generate_answer_with_timeout(TEST_PROMPT, 2.5)
+
+    assert client.request["config"].http_options.timeout == 2500
+
+
 class FakeGroqProviderClient:
     def __init__(self):
         self.request = None
+        self.timeout = None
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    def with_options(self, **options):
+        self.timeout = options["timeout"]
+        return self
 
     def create(self, **request):
         self.request = request
@@ -111,8 +127,35 @@ def test_groq_provider_returns_answer_and_token_counts():
     assert client.request["messages"] == TEST_PROMPT
 
 
+def test_groq_provider_uses_remaining_request_timeout():
+    client = FakeGroqProviderClient()
+    provider = GroqAnswerProvider(client, "test-model", 64)
+
+    provider.generate_answer_with_timeout(TEST_PROMPT, 2.5)
+
+    assert client.timeout == 2.5
+
+
 class FakeRateLimitError(Exception):
     status_code = 429
+
+
+def test_safe_rate_limit_headers_keeps_only_allowed_headers():
+    error = FakeRateLimitError("too many requests")
+    error.response = SimpleNamespace(
+        headers={
+            "Retry-After": "7",
+            "x-ratelimit-limit-requests": "100",
+            "x-ratelimit-limit-tokens": "6000",
+            "authorization": "do-not-log",
+        }
+    )
+
+    assert safe_rate_limit_headers(error) == {
+        "retry-after": "7",
+        "x-ratelimit-limit-requests": "100",
+        "x-ratelimit-limit-tokens": "6000",
+    }
 
 
 def test_timeout_error_is_temporary():
@@ -153,6 +196,75 @@ def test_retries_timeout_and_rate_limit_with_growing_waits(monkeypatch):
     assert waits == [1, 2]
 
 
+def test_retry_after_header_overrides_backoff(monkeypatch):
+    waits = []
+    monkeypatch.setattr("production_rag.providers.time.sleep", waits.append)
+
+    error = FakeRateLimitError("too many requests")
+    error.response = SimpleNamespace(headers={"retry-after": "7"})
+    provider = FakeSequenceProvider([error, ProviderResult("Recovered answer")])
+
+    result = generate_with_retries(provider, TEST_PROMPT, 2, 1, 4)
+
+    assert result.text == "Recovered answer"
+    assert waits == [7.0]
+
+
+def test_retry_after_over_budget_skips_sleep_and_uses_backup(monkeypatch):
+    waits = []
+    monkeypatch.setattr("production_rag.providers.time.sleep", waits.append)
+    error = FakeRateLimitError("too many requests")
+    error.response = SimpleNamespace(headers={"retry-after": "120"})
+    primary = FakeSequenceProvider([error])
+    backup = FakeSequenceProvider([ProviderResult("Backup answer")])
+
+    result = generate_with_fallback(
+        primary,
+        backup,
+        TEST_PROMPT,
+        attempts=3,
+        initial_delay_seconds=1,
+        max_delay_seconds=4,
+        retry_wait_budget=RetryWaitBudget(max_wait_seconds=10),
+    )
+
+    assert result.text == "Backup answer"
+    assert waits == []
+    assert primary.calls == 1
+    assert backup.calls == 1
+
+
+def test_retry_wait_is_logged_separately_from_provider_call(monkeypatch, caplog):
+    waits = []
+    monkeypatch.setattr("production_rag.providers.time.sleep", waits.append)
+    error = FakeRateLimitError("too many requests")
+    error.response = SimpleNamespace(headers={"retry-after": "2"})
+    provider = FakeSequenceProvider([error, ProviderResult("Recovered answer")])
+
+    with caplog.at_level(logging.INFO, logger="production_rag.providers"):
+        generate_with_retries(
+            provider,
+            TEST_PROMPT,
+            attempts=2,
+            initial_delay_seconds=1,
+            max_delay_seconds=4,
+            retry_wait_budget=RetryWaitBudget(max_wait_seconds=10),
+        )
+
+    wait_record = next(
+        record for record in caplog.records
+        if record.message == "provider_retry_wait_completed"
+    )
+    call_record = next(
+        record for record in caplog.records
+        if record.message == "provider_call_succeeded"
+    )
+    assert waits == [2.0]
+    assert wait_record.requested_wait_seconds == 2.0
+    assert wait_record.elapsed_ms >= 0
+    assert call_record.elapsed_ms >= 0
+
+
 def test_success_log_has_timing_and_tokens_but_not_prompt(caplog):
     prompt = [
         {"role": "system", "content": "PRIVATE DOCUMENT TEXT"},
@@ -170,6 +282,11 @@ def test_success_log_has_timing_and_tokens_but_not_prompt(caplog):
     assert record.elapsed_ms >= 0
     assert record.input_tokens == 8
     assert record.output_tokens == 4
+    assert record.model == "unknown"
+    assert record.status_code == 200
+    assert record.finish_reason is None
+    assert record.thinking_tokens is None
+    assert record.rate_limit_failure is False
     assert "PRIVATE DOCUMENT TEXT" not in caplog.text
 
 
@@ -227,3 +344,23 @@ def test_provider_factory_uses_config_and_timeouts(monkeypatch):
     assert created["gemini"]["http_options"].retry_options.attempts == 1
     assert created["groq"]["timeout"] == 15
     assert created["groq"]["max_retries"] == 0
+
+
+def test_gemini_provider_passes_low_thinking_setting():
+    client = FakeGeminiClient()
+    provider = GeminiAnswerProvider(client, "test-model", 64)
+    provider.thinking_level = "low"
+
+    provider.generate_answer(TEST_PROMPT)
+
+    assert client.request["config"].thinking_config.thinking_level.value == "LOW"
+
+
+def test_groq_provider_passes_low_reasoning_setting():
+    client = FakeGroqProviderClient()
+    provider = GroqAnswerProvider(client, "test-model", 64)
+    provider.reasoning_effort = "low"
+
+    provider.generate_answer(TEST_PROMPT)
+
+    assert client.request["reasoning_effort"] == "low"

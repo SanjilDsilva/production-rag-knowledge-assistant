@@ -7,4 +7,7 @@ def test_load_llm_config_reads_models_and_limits():
     assert config["models"]["primary"] == "gemini-3.8-flash"
     assert config["models"]["backup"] == "openai/gpt-oss-20b"
     assert config["limits"]["context_tokens"] == 3000
+    assert config["limits"]["retrieval_top_k"] == 10
+    assert config["limits"]["citation_labels_follow_prompt_order"] is True
+    assert config["limits"]["max_retry_wait_seconds"] == 10
     assert config["limits"]["output_tokens"] == 512

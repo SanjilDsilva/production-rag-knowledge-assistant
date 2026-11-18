@@ -26,7 +26,8 @@ from fastapi import (
 )
 from uuid import uuid4
 
-from production_rag.providers import create_answer_providers
+from production_rag.providers import RequestDeadline, create_answer_providers
+from production_rag.settings import load_llm_config
 from pydantic import BaseModel, Field
 from production_rag.answering import (
     UNSUPPORTED_ANSWER,
@@ -367,6 +368,9 @@ def ask_question(
     identity: dict[str, str] = Depends(get_current_identity),
     status_store: DocumentStatusStore = Depends(get_document_status_store),
 ) -> dict[str, object]:
+    request_deadline = RequestDeadline.after(
+        load_llm_config()["limits"].get("request_deadline_seconds", 15)
+    )
     if not request.app.state.question_rate_limiter.allow(
         identity["tenant_id"],
         identity["user_id"],
@@ -431,6 +435,7 @@ def ask_question(
             identity["tenant_id"],
             identity["user_id"],
         ),
+        request_deadline=request_deadline,
     )
     return {
         "answer": result.answer,

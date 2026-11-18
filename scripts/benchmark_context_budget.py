@@ -41,8 +41,9 @@ provider_logger.addHandler(token_collector)
 
 client = QdrantClient(url=os.environ["QDRANT_URL"])
 cases = load_evaluation_cases(Path("tests/fixtures/retrieval_eval.jsonl"))
-answerable_cases = [case for case in cases if case.answerable]
-
+sample_cases = [
+    case for case in cases if case.answerable and case.category == "multi_document"
+][:1]
 primary_provider, backup_provider = create_answer_providers(
     os.environ["GOOGLE_API_KEY"],
     os.environ["GROQ_API_KEY"],
@@ -52,7 +53,7 @@ primary_provider, backup_provider = create_answer_providers(
 def run_condition(apply_context_budget: bool) -> tuple[int, int, int, int]:
     relevant_citation_answers = 0
     measurement_start = len(token_collector.measurements)
-    for case in answerable_cases[:1]:
+    for case in sample_cases:
         result = answer_question(
             qdrant_client=client,
             primary_provider=primary_provider,
@@ -65,7 +66,7 @@ def run_condition(apply_context_budget: bool) -> tuple[int, int, int, int]:
             document_set_version=f"budget-{apply_context_budget}",
             role="member",
             apply_context_budget=apply_context_budget,
-            context_token_limit=500,
+            context_token_limit=750,
         )
         cited_ids = {citation.chunk_id for citation in result.citations}
         if cited_ids & case.relevant_chunk_ids:
@@ -77,7 +78,7 @@ def run_condition(apply_context_budget: bool) -> tuple[int, int, int, int]:
 
     return (
         relevant_citation_answers,
-        min(1, len(answerable_cases)),
+        len(sample_cases),
         prompt_tokens_before,
         prompt_tokens_after,
     )

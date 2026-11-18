@@ -4,8 +4,12 @@ backup = "openai/gpt-oss-20b"
 
 [limits]
 context_tokens = 3000
+retrieval_top_k = 10
+citation_labels_follow_prompt_order = true
 output_tokens = 512
 request_timeout_seconds = 15
+request_deadline_seconds = 15
 attempts_per_provider = 3
 retry_initial_delay_seconds = 1
 retry_max_delay_seconds = 4
+max_retry_wait_seconds = 10

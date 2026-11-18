@@ -51,7 +51,7 @@ def test_remove_near_duplicates_keeps_best_rank_and_other_documents():
     assert kept == [best_ranked, other_document]
 
 
-def test_select_chunks_stops_at_first_chunk_that_does_not_fit(monkeypatch):
+def test_select_chunks_skips_nonfitting_chunk_and_keeps_later_fit(monkeypatch):
     monkeypatch.setattr(
         context_budget,
         "get_tokenizer",
@@ -98,5 +98,5 @@ def test_select_chunks_stops_at_first_chunk_that_does_not_fit(monkeypatch):
         max_context_tokens=5,
     )
 
-    assert selected == [first]
+    assert selected == [first, third]
     assert selected[0].payload["location"] == "page 2"
