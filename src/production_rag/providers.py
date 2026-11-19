@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Protocol
 from google import genai
 from google.genai import types
@@ -21,6 +22,7 @@ class ProviderResult:
     thinking_tokens: int | None = None
     finish_reason: str | None = None
     model_name: str | None = None
+    rate_limit_headers: dict[str, str] | None = None
 
 
 class AnswerProvider(Protocol):
@@ -157,7 +159,11 @@ class GroqAnswerProvider:
             if timeout_seconds is not None
             else self.client
         )
-        response = client.chat.completions.create(**request_options)
+        raw_response = client.chat.completions.with_raw_response.create(
+            **request_options
+        )
+        rate_limit_headers = safe_response_rate_limit_headers(raw_response.headers)
+        response = raw_response.parse()
 
         if not response.choices:
             raise RuntimeError("Groq returned no answer choices")
@@ -180,6 +186,7 @@ class GroqAnswerProvider:
             ),
             finish_reason=str(finish) if finish is not None else None,
             model_name=self.model_name,
+            rate_limit_headers=rate_limit_headers,
         )
 
 
@@ -235,10 +242,7 @@ def retry_after_seconds(error: Exception) -> float | None:
         )
 
 
-def safe_rate_limit_headers(error: Exception) -> dict[str, str]:
-    response = getattr(error, "response", None)
-    headers = getattr(response, "headers", {}) or {}
-    allowed_names = {
+RATE_LIMIT_HEADER_NAMES = {
         "retry-after",
         "x-ratelimit-limit-requests",
         "x-ratelimit-limit-tokens",
@@ -247,11 +251,22 @@ def safe_rate_limit_headers(error: Exception) -> dict[str, str]:
         "x-ratelimit-reset-requests",
         "x-ratelimit-reset-tokens",
     }
+
+
+def safe_response_rate_limit_headers(
+    headers: Mapping[str, object],
+) -> dict[str, str]:
     return {
         name.lower(): str(value)
         for name, value in headers.items()
-        if name.lower() in allowed_names
+        if name.lower() in RATE_LIMIT_HEADER_NAMES
     }
+
+
+def safe_rate_limit_headers(error: Exception) -> dict[str, str]:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    return safe_response_rate_limit_headers(headers)
 
 
 @dataclass
@@ -436,6 +451,7 @@ def generate_with_retries(
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,
                     "thinking_tokens": result.thinking_tokens,
+                    "rate_limit_headers": result.rate_limit_headers or {},
                 },
             )
             return result

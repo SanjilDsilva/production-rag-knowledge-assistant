@@ -28,6 +28,58 @@ def test_health_endpoint_returns_ok():
     assert response.json() == {"status": "ok"}
 
 
+@pytest.mark.parametrize(
+    ("qdrant_fails", "model_loaded", "expected_code", "expected_status"),
+    [
+        (False, True, 200, "ready"),
+        (True, True, 503, "not_ready"),
+        (False, False, 503, "not_ready"),
+    ],
+)
+def test_ready_endpoint_reports_dependencies(
+    monkeypatch, qdrant_fails, model_loaded, expected_code, expected_status
+):
+    class FakeQdrant:
+        def get_collections(self):
+            if qdrant_fails:
+                raise RuntimeError("offline")
+
+    monkeypatch.setattr(api, "is_embedding_model_loaded", lambda: model_loaded)
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(qdrant_client=FakeQdrant()))
+    )
+    response = SimpleNamespace(status_code=200)
+
+    result = api.readiness_endpoint(request, response)
+
+    assert response.status_code == expected_code
+    assert result["status"] == expected_status
+    assert result["checks"]["qdrant"] == ("unavailable" if qdrant_fails else "ok")
+
+
+def test_version_endpoint_reports_safe_metadata():
+    response = client.get("/version")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app_version"] == api.get_app_version()
+    assert data["embedding_model"] == api.MODEL_NAME
+    assert data["embedding_model_revision"] == api.MODEL_REVISION
+    assert data["prompt_version"] == api.PROMPT_VERSION
+    assert data["chunker_version"] == api.CHUNKER_VERSION
+    assert data["citation_label_mode"] in {"prompt_order", "chunk_id_order"}
+    assert not any(
+        secret_word in response.text.casefold()
+        for secret_word in (
+            "api_key",
+            "secret",
+            ".env",
+            "google_api_key",
+            "groq_api_key",
+        )
+    )
+
+
 def test_dev_identity_returns_server_owned_identity(monkeypatch):
     monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
 
@@ -68,6 +120,11 @@ def test_startup_prepares_local_storage_and_status_store(tmp_path, monkeypatch):
     with TestClient(api.app):
         assert api.app.state.upload_storage.root == (tmp_path / "uploads").resolve()
         assert api.app.state.status_store.database_path == tmp_path / "app.db"
+        assert api.app.state.upload_rate_limiter.max_requests == 5
+        assert api.app.state.upload_rate_limiter.window_seconds == 60
+        assert api.app.state.question_rate_limiter.max_requests == 2
+        assert api.app.state.global_question_minute_limiter.max_requests == 3
+        assert api.app.state.global_question_daily_limiter.max_requests == 100
         assert api.app.state.qdrant_client.collection_exists(
             collection_name=api.COLLECTION_NAME
         )
@@ -140,6 +197,40 @@ def test_upload_ignores_spoofed_fields_and_keeps_path_safe(tmp_path, monkeypatch
         saved_files = list(folder.iterdir())
         assert len(saved_files) == 1
         assert saved_files[0].name != "../../x.txt"
+
+def test_upload_rate_limit_is_per_user_and_returns_retry_after(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
+    monkeypatch.setattr(
+        api, "process_document_background", lambda *args: None
+    )
+
+    with TestClient(api.app) as test_client:
+        api.app.state.upload_rate_limiter = api.FixedWindowRateLimiter(
+            max_requests=1, window_seconds=60
+        )
+        first = test_client.post(
+            "/documents",
+            headers={"X_Dev_User": "user-a"},
+            files={"file": ("first.txt", b"first content", "text/plain")},
+        )
+        blocked = test_client.post(
+            "/documents",
+            headers={"X_Dev_User": "user-a"},
+            files={"file": ("second.txt", b"second content", "text/plain")},
+        )
+        other_user = test_client.post(
+            "/documents",
+            headers={"X_Dev_User": "user-b"},
+            files={"file": ("other.txt", b"other content", "text/plain")},
+        )
+
+    assert first.status_code == 202
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+    assert other_user.status_code == 202
 
 
 def test_duplicate_upload_reuses_id_only_for_same_user(tmp_path, monkeypatch):
@@ -460,7 +551,34 @@ def test_question_route_blocks_suspicious_query_before_document_lookup(
         for record in caplog.records
         if record.name == "production_rag.audit" and record.message == "question_audit"
     )
-    assert audit_record.decision == "blocked_suspicious_query"
+    assert audit_record.decision == "blocked_suspicious_query_pattern"
+    assert "Ignore all previous instructions" not in caplog.text
+
+
+def test_question_route_blocks_overlong_question_before_document_lookup(
+    tmp_path, monkeypatch, caplog
+):
+    question = "x" * 1001
+    caplog.set_level(logging.INFO, logger="production_rag.audit")
+    monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
+
+    with TestClient(api.app) as test_client:
+        response = test_client.post(
+            "/questions",
+            headers={"X_Dev_User": "user-a"},
+            json={"question": question},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Question was blocked by safety checks."}
+    audit_record = next(
+        record
+        for record in caplog.records
+        if record.name == "production_rag.audit" and record.message == "question_audit"
+    )
+    assert audit_record.decision == "blocked_question_too_long"
+    assert question not in caplog.text
 
 
 def test_question_route_rate_limits_user_questions(tmp_path, monkeypatch, caplog):
@@ -493,6 +611,77 @@ def test_question_route_rate_limits_user_questions(tmp_path, monkeypatch, caplog
         if record.name == "production_rag.audit" and record.message == "question_audit"
     )
     assert audit_record.decision == "rate_limited"
+
+
+@pytest.mark.parametrize(
+    ("minute_cap", "daily_cap", "expected_reason"),
+    [
+        (1, 50, "global_minute_cap"),
+        (6, 1, "global_daily_cap"),
+    ],
+)
+def test_global_question_caps_degrade_and_count_separately(
+    tmp_path, monkeypatch, minute_cap, daily_cap, expected_reason
+):
+    monkeypatch.setattr(api, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(api, "DEV_IDENTITY_ENABLED", True)
+    monkeypatch.setenv("GOOGLE_API_KEY", "fake-google-key")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key")
+    monkeypatch.setattr(
+        api.DocumentStatusStore,
+        "ready_document_ids",
+        lambda *args: ["doc-1"],
+    )
+    monkeypatch.setattr(
+        api,
+        "create_answer_providers",
+        lambda *args: (object(), object()),
+    )
+    monkeypatch.delattr(api.app.state, "answer_providers", raising=False)
+
+    def fake_answer_question(**arguments):
+        cap_reason = arguments["generation_cap_check"]()
+        if cap_reason is not None:
+            return SimpleNamespace(
+                answer=f"degraded: {cap_reason}",
+                citations=[],
+                degraded_mode=True,
+                degraded_reason=cap_reason,
+            )
+        return SimpleNamespace(
+            answer="degraded: provider_failure",
+            citations=[],
+            degraded_mode=True,
+            degraded_reason="provider_failure",
+        )
+
+    monkeypatch.setattr(api, "answer_question", fake_answer_question)
+
+    with TestClient(api.app) as test_client:
+        api.app.state.question_rate_limiter = api.FixedWindowRateLimiter(5, 60)
+        api.app.state.global_question_minute_limiter = api.FixedWindowRateLimiter(
+            minute_cap, 60
+        )
+        api.app.state.global_question_daily_limiter = api.FixedWindowRateLimiter(
+            daily_cap, 86400
+        )
+        responses = [
+            test_client.post(
+                "/questions",
+                headers={"X_Dev_User": user},
+                json={"question": "What does the source say?"},
+            )
+            for user in ("user-a", "user-b")
+        ]
+
+        assert api.app.state.degraded_response_counts == {
+            "question_cap": 1,
+            "provider_failure": 1,
+        }
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert responses[0].json()["answer"] == "degraded: provider_failure"
+    assert responses[1].json()["answer"] == f"degraded: {expected_reason}"
 
 
 def test_question_route_reuses_fake_providers(tmp_path, monkeypatch):

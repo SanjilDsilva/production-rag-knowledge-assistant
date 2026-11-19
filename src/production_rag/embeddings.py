@@ -44,6 +44,8 @@ def get_embedding_model() -> Any:
         device="cpu",
     )
 
+def is_embedding_model_loaded() -> bool:
+    return get_embedding_model.cache_info().currsize > 0
 
 def _encode(texts: list[str]) -> list[list[float]]:
     if not texts:

@@ -721,7 +721,9 @@ class FakeAnswerProvider:
         return self.outcome
 
 
-def run_with_fake_answer_providers(monkeypatch, primary, backup):
+def run_with_fake_answer_providers(
+    monkeypatch, primary, backup, generation_cap_check=None
+):
     chunk_id = "a" * 64
     chunk = SimpleNamespace(
         payload={
@@ -750,6 +752,7 @@ def run_with_fake_answer_providers(monkeypatch, primary, backup):
         ready_document_ids=["doc-1"],
         answer_cache=BoundedAnswerCache(),
         document_set_version="docs-v1",
+        generation_cap_check=generation_cap_check,
     )
     return result, chunk_id
 
@@ -782,12 +785,32 @@ def test_both_provider_failures_return_retrieved_sources(monkeypatch):
     result, chunk_id = run_with_fake_answer_providers(monkeypatch, primary, backup)
 
     assert result.degraded_mode is True
+    assert result.degraded_reason == "provider_failure"
     assert "AI summary is unavailable" in result.answer
     assert "The policy requires approval." in result.answer
     assert "[1]" in result.answer
     assert result.citations == [Citation(chunk_id, "policy.txt", "page 1")]
     assert primary.calls == 1
     assert backup.calls == 1
+
+
+def test_global_question_cap_returns_sources_without_calling_provider(monkeypatch):
+    primary = FakeAnswerProvider(ProviderResult("Should not be called [1]."))
+    backup = FakeAnswerProvider(RuntimeError("Should not be called"))
+
+    result, chunk_id = run_with_fake_answer_providers(
+        monkeypatch,
+        primary,
+        backup,
+        generation_cap_check=lambda: "global_minute_cap",
+    )
+
+    assert result.degraded_mode is True
+    assert result.degraded_reason == "global_minute_cap"
+    assert "The policy requires approval." in result.answer
+    assert result.citations == [Citation(chunk_id, "policy.txt", "page 1")]
+    assert primary.calls == 0
+    assert backup.calls == 0
 
 
 def test_normal_provider_success_does_not_use_degraded_mode(monkeypatch):

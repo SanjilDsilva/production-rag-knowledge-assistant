@@ -1,11 +1,15 @@
 import os
+import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 import hashlib
+from threading import Lock
 from typing import BinaryIO, Literal
 from qdrant_client import QdrantClient
 import shutil
 from tempfile import TemporaryDirectory
+import tomllib
+from production_rag.chunking import CHUNKER_VERSION
 
 from production_rag.indexing import index_document_file
 from production_rag.vector_store import delete_document_chunks
@@ -23,6 +27,7 @@ from fastapi import (
     File,
     UploadFile,
     Form,
+    Response,
 )
 from uuid import uuid4
 
@@ -33,8 +38,14 @@ from production_rag.answering import (
     UNSUPPORTED_ANSWER,
     answer_question,
     log_answer_audit,
+    PROMPT_VERSION,
 )
-from production_rag.query_security import is_suspicious_query
+from production_rag.embeddings import (
+    MODEL_NAME,
+    MODEL_REVISION,
+    is_embedding_model_loaded,
+)
+from production_rag.query_security import query_block_reason
 from production_rag.rate_limit import FixedWindowRateLimiter
 from production_rag.answer_cache import (
     BoundedAnswerCache,
@@ -43,9 +54,11 @@ from production_rag.answer_cache import (
     create_cache_backend,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class QuestionRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=1000)
+    question: str = Field(min_length=1, max_length=10000)
 
 
 APP_ENV = os.getenv("APP_ENV", "production").casefold()
@@ -106,14 +119,50 @@ def initialize_app_storage(app: FastAPI) -> None:
     app.state.upload_storage = LocalUploadStorage(DATA_ROOT / "uploads")
     app.state.status_store = DocumentStatusStore(DATA_ROOT / "app.db")
     app.state.answer_cache = create_answer_cache()
+    limits = load_llm_config()["limits"]
+    app.state.upload_rate_limiter = FixedWindowRateLimiter(
+        max_requests=limits["upload_requests_per_minute"],
+        window_seconds=limits["upload_rate_limit_window_seconds"],
+    )
     app.state.question_rate_limiter = FixedWindowRateLimiter(
-        max_requests=10,
+        max_requests=limits["user_questions_per_minute"],
         window_seconds=60,
     )
+    app.state.global_question_minute_limiter = FixedWindowRateLimiter(
+        max_requests=limits["global_questions_per_minute"],
+        window_seconds=60,
+    )
+    app.state.global_question_daily_limiter = FixedWindowRateLimiter(
+        max_requests=limits["global_questions_per_day"],
+        window_seconds=86400,
+    )
+    app.state.degraded_response_counts = {
+        "question_cap": 0,
+        "provider_failure": 0,
+    }
+    app.state.degraded_response_lock = Lock()
     app.state.status_store.reset_processing()
     qdrant_client = create_qdrant_client()
     create_collection(qdrant_client)
     app.state.qdrant_client = qdrant_client
+
+
+def record_degraded_response(app: FastAPI, reason: str | None) -> None:
+    if reason in {"global_minute_cap", "global_daily_cap"}:
+        category = "question_cap"
+    elif reason == "provider_failure":
+        category = "provider_failure"
+    else:
+        return
+
+    with app.state.degraded_response_lock:
+        app.state.degraded_response_counts[category] += 1
+        count = app.state.degraded_response_counts[category]
+
+    logger.info(
+        "degraded_response_count",
+        extra={"category": category, "count": count},
+    )
 
 
 def get_upload_storage(request: Request) -> UploadStorage:
@@ -242,6 +291,16 @@ def upload_document(
     storage: UploadStorage = Depends(get_upload_storage),
     status_store: DocumentStatusStore = Depends(get_document_status_store),
 ) -> dict[str, str]:
+    limiter = request.app.state.upload_rate_limiter
+    if not limiter.allow(identity["tenant_id"], identity["user_id"]):
+        wait_seconds = limiter.retry_after_seconds(
+            identity["tenant_id"], identity["user_id"]
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Too many uploads. Please wait before trying again.",
+            headers={"Retry-After": str(wait_seconds)},
+        )
     original_filename = file.filename or "uploaded-file"
     extension = Path(original_filename).suffix.casefold()
     try:
@@ -311,6 +370,47 @@ def upload_document(
 @app.get("/health")
 def health_endpoint() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def readiness_endpoint(request: Request, response: Response) -> dict[str, object]:
+    checks = {
+        "qdrant": "ok",
+        "embedding_model": ("loaded" if is_embedding_model_loaded() else "not_loaded"),
+    }
+    try:
+        request.app.state.qdrant_client.get_collections()
+    except Exception:
+        checks["qdrant"] = "unavailable"
+
+    ready = checks["qdrant"] == "ok" and checks["embedding_model"] == "loaded"
+    response.status_code = 200 if ready else 503
+    return {"status": "ready" if ready else "not_ready", "checks": checks}
+
+
+def get_app_version() -> str:
+    project_file = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    with project_file.open("rb") as file:
+        project = tomllib.load(file)
+    return project["project"]["version"]
+
+
+@app.get("/version")
+def version_endpoint() -> dict[str, str]:
+    limits = load_llm_config()["limits"]
+    label_mode = (
+        "prompt_order"
+        if limits.get("citation_labels_follow_prompt_order", True)
+        else "chunk_id_order"
+    )
+    return {
+        "app_version": get_app_version(),
+        "embedding_model": MODEL_NAME,
+        "embedding_model_revision": MODEL_REVISION,
+        "prompt_version": PROMPT_VERSION,
+        "chunker_version": CHUNKER_VERSION,
+        "citation_label_mode": label_mode,
+    }
 
 
 @app.get("/documents")
@@ -386,12 +486,13 @@ def ask_question(
             status_code=429,
             detail="Too many questions. Please wait before trying again.",
         )
-    if is_suspicious_query(payload.question):
+    block_reason = query_block_reason(payload.question)
+    if block_reason is not None:
         log_answer_audit(
             identity["tenant_id"],
             identity["user_id"],
             [],
-            "blocked_suspicious_query",
+            f"blocked_{block_reason}",
             False,
         )
         raise HTTPException(
@@ -406,21 +507,41 @@ def ask_question(
     if not ready_document_ids:
         return {"answer": UNSUPPORTED_ANSWER, "citations": []}
 
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not google_api_key or not groq_api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Question answering is not configured.",
-        )
+    def check_global_question_cap() -> str | None:
+        global_tenant = "global"
+        global_user = "questions"
+        if not request.app.state.global_question_daily_limiter.allow(
+            global_tenant, global_user
+        ):
+            return "global_daily_cap"
+        if not request.app.state.global_question_minute_limiter.allow(
+            global_tenant, global_user
+        ):
+            return "global_minute_cap"
+        return None
 
-    if not hasattr(request.app.state, "answer_providers"):
-        request.app.state.answer_providers = create_answer_providers(
-            google_api_key,
-            groq_api_key,
-        )
+    global_cap_reason = check_global_question_cap()
+    if global_cap_reason is None:
+        google_api_key = os.getenv("GOOGLE_API_KEY")
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not google_api_key or not groq_api_key:
+            raise HTTPException(
+                status_code=503,
+                detail="Question answering is not configured.",
+            )
 
-    primary_provider, backup_provider = request.app.state.answer_providers
+        if not hasattr(request.app.state, "answer_providers"):
+            request.app.state.answer_providers = create_answer_providers(
+                google_api_key,
+                groq_api_key,
+            )
+        primary_provider, backup_provider = request.app.state.answer_providers
+    else:
+        primary_provider = backup_provider = None
+
+    def generation_cap_check() -> str | None:
+        return global_cap_reason
+
     result = answer_question(
         qdrant_client=request.app.state.qdrant_client,
         primary_provider=primary_provider,
@@ -436,6 +557,11 @@ def ask_question(
             identity["user_id"],
         ),
         request_deadline=request_deadline,
+        generation_cap_check=generation_cap_check,
+    )
+    record_degraded_response(
+        request.app,
+        getattr(result, "degraded_reason", None),
     )
     return {
         "answer": result.answer,

@@ -88,15 +88,28 @@ class FakeGroqProviderClient:
     def __init__(self):
         self.request = None
         self.timeout = None
-        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+        self.headers = {
+            "x-ratelimit-limit-requests": "1000",
+            "x-ratelimit-limit-tokens": "8000",
+            "x-ratelimit-remaining-requests": "999",
+            "x-ratelimit-remaining-tokens": "7980",
+            "x-ratelimit-reset-requests": "23h59m",
+            "x-ratelimit-reset-tokens": "7s",
+            "authorization": "do-not-log",
+        }
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(
+                with_raw_response=SimpleNamespace(create=self.create_raw)
+            )
+        )
 
     def with_options(self, **options):
         self.timeout = options["timeout"]
         return self
 
-    def create(self, **request):
+    def create_raw(self, **request):
         self.request = request
-        return SimpleNamespace(
+        completion = SimpleNamespace(
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(content=" Supported answer [chunk-1] ")
@@ -106,6 +119,10 @@ class FakeGroqProviderClient:
                 prompt_tokens=14,
                 completion_tokens=6,
             ),
+        )
+        return SimpleNamespace(
+            headers=self.headers,
+            parse=lambda: completion,
         )
 
 
@@ -122,9 +139,33 @@ def test_groq_provider_returns_answer_and_token_counts():
     assert result.text == "Supported answer [chunk-1]"
     assert result.input_tokens == 14
     assert result.output_tokens == 6
+    assert result.rate_limit_headers == {
+        name: value for name, value in client.headers.items()
+        if name.startswith("x-ratelimit-")
+    }
     assert client.request["model"] == "test-model"
     assert client.request["max_completion_tokens"] == 64
     assert client.request["messages"] == TEST_PROMPT
+
+
+def test_groq_success_log_contains_only_safe_rate_limit_headers(caplog):
+    client = FakeGroqProviderClient()
+    provider = GroqAnswerProvider(client, "test-model", 64)
+
+    with caplog.at_level(logging.INFO, logger="production_rag.providers"):
+        generate_with_retries(provider, TEST_PROMPT, 1, 0, 0)
+
+    success_record = next(
+        record
+        for record in caplog.records
+        if record.message == "provider_call_succeeded"
+    )
+    assert success_record.rate_limit_headers == {
+        name: value for name, value in client.headers.items()
+        if name.startswith("x-ratelimit-")
+    }
+    assert "do-not-log" not in caplog.text
+    assert "Supported answer" not in caplog.text
 
 
 def test_groq_provider_uses_remaining_request_timeout():
@@ -338,8 +379,8 @@ def test_provider_factory_uses_config_and_timeouts(monkeypatch):
 
     assert primary.model_name == "gemini-3.8-flash"
     assert backup.model_name == "openai/gpt-oss-20b"
-    assert primary.max_output_tokens == 512
-    assert backup.max_output_tokens == 512
+    assert primary.max_output_tokens == 1000
+    assert backup.max_output_tokens == 1000
     assert created["gemini"]["http_options"].timeout == 15000
     assert created["gemini"]["http_options"].retry_options.attempts == 1
     assert created["groq"]["timeout"] == 15

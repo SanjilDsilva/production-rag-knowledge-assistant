@@ -1,5 +1,6 @@
 from threading import Lock
 from time import monotonic
+from math import ceil
 
 
 class FixedWindowRateLimiter:
@@ -31,3 +32,13 @@ class FixedWindowRateLimiter:
 
             self.windows[identity] = (started_at, count + 1)
             return True
+
+    def retry_after_seconds(self, tenant_id: str, user_id: str) -> int:
+        identity = (tenant_id, user_id)
+        with self.lock:
+            window = self.windows.get(identity)
+            if window is None:
+                return 0
+            started_at, _ = window
+            remaining = self.window_seconds - (monotonic() - started_at)
+            return max(1, ceil(remaining))

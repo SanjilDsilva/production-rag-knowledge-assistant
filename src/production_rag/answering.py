@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from collections.abc import Callable
 import re
 
 from qdrant_client import QdrantClient, models
@@ -250,6 +251,7 @@ class AnswerResult:
     citations: list[Citation]
     fallback_used: bool = False
     degraded_mode: bool = False
+    degraded_reason: str | None = None
 
 
 def build_degraded_answer(
@@ -274,8 +276,8 @@ def build_degraded_answer(
 
 def answer_question(
     qdrant_client: QdrantClient,
-    primary_provider: AnswerProvider,
-    backup_provider: AnswerProvider,
+    primary_provider: AnswerProvider | None,
+    backup_provider: AnswerProvider | None,
     question: str,
     tenant_id: str,
     user_id: str,
@@ -289,6 +291,7 @@ def answer_question(
     context_token_limit: int | None = None,
     retry_wait_budget: RetryWaitBudget | None = None,
     request_deadline: RequestDeadline | None = None,
+    generation_cap_check: Callable[[], str | None] | None = None,
 ) -> AnswerResult:
     if not question.strip():
         raise ValueError("Question cannot be empty")
@@ -443,6 +446,36 @@ def answer_question(
             degraded_answer,
             degraded_citations,
             degraded_mode=True,
+            degraded_reason="request_deadline",
+        )
+
+    cap_reason = generation_cap_check() if generation_cap_check is not None else None
+    if cap_reason is not None:
+        degraded_answer, degraded_citations = build_degraded_answer(selected_chunks)
+        log_answer_audit(
+            tenant_id,
+            user_id,
+            used_document_ids,
+            "degraded_global_question_cap",
+            False,
+        )
+        logger.info(
+            "answer_request_completed",
+            extra={
+                "cache_hit": False,
+                "elapsed_ms": round(
+                    (time.perf_counter() - request_started_at) * 1000,
+                    2,
+                ),
+                "degraded_mode": True,
+                "degraded_reason": cap_reason,
+            },
+        )
+        return AnswerResult(
+            degraded_answer,
+            degraded_citations,
+            degraded_mode=True,
+            degraded_reason=cap_reason,
         )
 
     lookup_started_at = time.perf_counter()
@@ -503,6 +536,9 @@ def answer_question(
         },
     )
 
+    if primary_provider is None or backup_provider is None:
+        raise RuntimeError("Answer providers are required before generation.")
+
     generation_started_at = time.perf_counter()
 
     try:
@@ -538,12 +574,14 @@ def answer_question(
                     2,
                 ),
                 "degraded_mode": True,
+                "degraded_reason": "provider_failure",
             },
         )
         return AnswerResult(
             degraded_answer,
             degraded_citations,
             degraded_mode=True,
+            degraded_reason="provider_failure",
         )
 
     log_answer_stage_timing("model_generation", generation_started_at)
