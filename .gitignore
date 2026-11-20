@@ -17,3 +17,5 @@ data/cache.db*
 /data/provider_call_timings*.jsonl
 /data/provider_answer_diagnostics*.jsonl
 /data/provider_support_review.csv
+node_modules/
+frontend/dist/

@@ -471,7 +471,8 @@ def ask_question(
     request_deadline = RequestDeadline.after(
         load_llm_config()["limits"].get("request_deadline_seconds", 15)
     )
-    if not request.app.state.question_rate_limiter.allow(
+    limiter = request.app.state.question_rate_limiter
+    if not limiter.allow(
         identity["tenant_id"],
         identity["user_id"],
     ):
@@ -482,9 +483,13 @@ def ask_question(
             "rate_limited",
             False,
         )
+        wait_seconds = limiter.retry_after_seconds(
+            identity["tenant_id"], identity["user_id"]
+        )
         raise HTTPException(
             status_code=429,
             detail="Too many questions. Please wait before trying again.",
+            headers={"Retry-After": str(wait_seconds)},
         )
     block_reason = query_block_reason(payload.question)
     if block_reason is not None:
@@ -570,6 +575,7 @@ def ask_question(
                 "chunk_id": citation.chunk_id,
                 "document_name": citation.document_name,
                 "location": citation.location,
+                "text": citation.text,
             }
             for citation in result.citations
         ],

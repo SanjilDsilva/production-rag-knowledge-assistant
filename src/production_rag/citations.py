@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from qdrant_client import models
 
@@ -8,6 +8,7 @@ class Citation:
     chunk_id: str
     document_name: str
     location: str
+    text: str | None = field(default=None, compare=False)
 
 
 def build_citations(
@@ -23,6 +24,7 @@ def build_citations(
         if document_name is None and payload.get("source") == "benchmark":
             document_name = payload.get("document_id")
         location = payload.get("location")
+        text = payload.get("text")
 
         if not chunk_id or not document_name or not location:
             raise ValueError("Retrieved chunk is missing citation details")
@@ -32,6 +34,7 @@ def build_citations(
                 chunk_id=chunk_id,
                 document_name=document_name,
                 location=location,
+                text=text,
             )
         )
 
