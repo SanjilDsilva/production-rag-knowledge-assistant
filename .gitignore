@@ -19,3 +19,4 @@ data/cache.db*
 /data/provider_support_review.csv
 node_modules/
 frontend/dist/
+data/qdrant/

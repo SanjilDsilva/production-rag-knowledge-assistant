@@ -575,10 +575,10 @@ def ask_question(
                 "chunk_id": citation.chunk_id,
                 "document_name": citation.document_name,
                 "location": citation.location,
-                "text": citation.text,
+                "text": getattr(citation, "text", None),
             }
             for citation in result.citations
         ],
-        "degraded": result.degraded_mode,
-        "trace": result.trace,
+        "degraded": getattr(result, "degraded_mode", False),
+        "trace": getattr(result, "trace", None),
     }
