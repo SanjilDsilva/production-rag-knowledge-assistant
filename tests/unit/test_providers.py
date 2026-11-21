@@ -377,7 +377,7 @@ def test_provider_factory_uses_config_and_timeouts(monkeypatch):
 
     primary, backup = create_answer_providers("fake-gemini-key", "fake-groq-key")
 
-    assert primary.model_name == "gemini-3.8-flash"
+    assert primary.model_name == "gemini-3.1-flash-lite"
     assert backup.model_name == "openai/gpt-oss-20b"
     assert primary.max_output_tokens == 1000
     assert backup.max_output_tokens == 1000

