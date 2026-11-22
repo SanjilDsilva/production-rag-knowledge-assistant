@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Callable
 import re
 
@@ -252,7 +252,7 @@ class AnswerResult:
     fallback_used: bool = False
     degraded_mode: bool = False
     degraded_reason: str | None = None
-    trace: dict | None = None
+    trace: dict | None = field(default=None, compare=False)
 
 
 def build_degraded_answer(

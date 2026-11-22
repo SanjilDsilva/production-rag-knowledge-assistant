@@ -5,9 +5,10 @@ import { DevUser } from '../types/rag';
 interface NavbarProps {
   currentUser: DevUser;
   onUserChange: (user: DevUser) => void;
+  onOpenOnboarding: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ currentUser, onUserChange }) => {
+export const Navbar: React.FC<NavbarProps> = ({ currentUser, onUserChange, onOpenOnboarding }) => {
   const navLinkClass = ({ isActive }: { isActive: boolean }) =>
     `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
       isActive
@@ -43,15 +44,31 @@ export const Navbar: React.FC<NavbarProps> = ({ currentUser, onUserChange }) => 
         </div>
 
         {/* Dev Identity Persona Switcher */}
-        <div className="flex items-center space-x-3 text-xs">
-          <span className="text-slate-400">Dev Persona:</span>
+        <div className="flex items-center space-x-2 text-xs">
+          <button
+            type="button"
+            onClick={onOpenOnboarding}
+            className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-slate-300 hover:text-white hover:border-blue-500 transition-colors flex items-center space-x-1"
+            title="Switch Auth Mode / Persona"
+          >
+            <span>🔑</span>
+            <span className="hidden sm:inline">Auth Mode</span>
+          </button>
           <select
             value={currentUser}
             onChange={(e) => onUserChange(e.target.value as DevUser)}
-            className="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1 text-slate-200 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            className="rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1 text-slate-200 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-sans"
           >
-            <option value="user-a">user-a (Member)</option>
-            <option value="user-b">user-b (Admin)</option>
+            <optgroup label="🏢 Acme Corp (Tenant 1)">
+              <option value="user-a">user-a (Member)</option>
+              <option value="user-b">user-b (Admin)</option>
+              <option value="user-c">user-c (Member)</option>
+            </optgroup>
+            <optgroup label="🛡️ Stark Industries (Tenant 2)">
+              <option value="user-d">user-d (Admin)</option>
+              <option value="user-e">user-e (Member)</option>
+              <option value="user-f">user-f (Member)</option>
+            </optgroup>
           </select>
         </div>
       </div>

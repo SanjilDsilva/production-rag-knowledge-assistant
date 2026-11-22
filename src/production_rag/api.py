@@ -76,22 +76,46 @@ def get_current_identity(
     if not DEV_IDENTITY_ENABLED:
         raise HTTPException(status_code=503, detail="Development identity is disabled.")
 
-    dev_roles = {
-        "user-a": "member",
-        "user-b": "admin",
+    dev_identities = {
+        # Tenant 1: Acme Corp / Dev Tenant
+        "user-a": {
+            "tenant_id": "dev-tenant",
+            "user_id": "dev-user-a",
+            "role": "member",
+        },
+        "user-b": {
+            "tenant_id": "dev-tenant",
+            "user_id": "dev-user-b",
+            "role": "admin",
+        },
+        "user-c": {
+            "tenant_id": "dev-tenant",
+            "user_id": "dev-user-c",
+            "role": "member",
+        },
+        # Tenant 2: Stark Industries
+        "user-d": {
+            "tenant_id": "stark-industries",
+            "user_id": "stark-user-d",
+            "role": "admin",
+        },
+        "user-e": {
+            "tenant_id": "stark-industries",
+            "user_id": "stark-user-e",
+            "role": "member",
+        },
+        "user-f": {
+            "tenant_id": "stark-industries",
+            "user_id": "stark-user-f",
+            "role": "member",
+        },
     }
-
-    if x_dev_user not in dev_roles:
+    if x_dev_user not in dev_identities:
         raise HTTPException(
             status_code=400,
-            detail="X_Dev_User must be user-a or user-b.",
+            detail=f"X_Dev_User must be one of: {', '.join(dev_identities.keys())}",
         )
-
-    return {
-        "tenant_id": "dev-tenant",
-        "user_id": f"dev-{x_dev_user}",
-        "role": dev_roles[x_dev_user],
-    }
+    return dev_identities[x_dev_user]
 
 
 DATA_ROOT = Path(os.getenv("RAG_DATA_DIR", "data"))
@@ -581,4 +605,105 @@ def ask_question(
         ],
         "degraded": getattr(result, "degraded_mode", False),
         "trace": getattr(result, "trace", None),
+    }
+
+
+def get_document_metrics_summary(
+    status_store: DocumentStatusStore, tenant_id: str | None = None
+) -> dict[str, int]:
+    """Calculate live document counts grouped by status from SQLite."""
+    import sqlite3
+    from contextlib import closing
+
+    query = "SELECT status, COUNT(*) FROM document_status"
+    params = ()
+    if tenant_id:
+        query += " WHERE tenant_id = ?"
+        params = (tenant_id,)
+    query += " GROUP BY status"
+
+    counts = {"ready": 0, "failed": 0, "processing": 0, "queued": 0, "total": 0}
+    with closing(sqlite3.connect(status_store.database_path)) as connection:
+        for row in connection.execute(query, params):
+            status, count = row[0], row[1]
+            if status in counts:
+                counts[status] = count
+            counts["total"] += count
+    return counts
+
+
+@app.get("/dashboard/summary")
+def get_dashboard_summary(
+    request: Request,
+    identity: dict[str, str] = Depends(get_current_identity),
+    status_store: DocumentStatusStore = Depends(get_document_status_store),
+) -> dict:
+    daily_limiter = request.app.state.global_question_daily_limiter
+    daily_used = daily_limiter.windows.get(("global", "questions"), (0, 0))[1]
+    daily_max = daily_limiter.max_requests
+    daily_remaining = max(0, daily_max - daily_used)
+
+    if identity["role"] != "admin":
+        my_docs = status_store.list_accessible(
+            identity["tenant_id"], identity["user_id"], identity["role"]
+        )
+        ready_count = sum(1 for d in my_docs if d.get("status") == "ready")
+        failed_count = sum(1 for d in my_docs if d.get("status") == "failed")
+        return {
+            "role": "member",
+            "user_id": identity["user_id"],
+            "tenant_id": identity["tenant_id"],
+            "personal_documents": {
+                "total": len(my_docs),
+                "ready": ready_count,
+                "failed": failed_count,
+            },
+            "rate_limits": {
+                "user_requests_per_minute": 2,
+                "daily_pool_remaining": daily_remaining,
+                "daily_pool_max": daily_max,
+            },
+        }
+
+    tenant_docs = get_document_metrics_summary(
+        status_store, tenant_id=identity["tenant_id"]
+    )
+    system_docs = get_document_metrics_summary(status_store)
+    cache_stats = request.app.state.answer_cache.stats()
+    degraded_counts = dict(request.app.state.degraded_response_counts)
+
+    try:
+        request.app.state.qdrant_client.get_collections()
+        qdrant_status = "connected"
+    except Exception:
+        qdrant_status = "unavailable"
+
+    model_status = "loaded" if is_embedding_model_loaded() else "not_loaded"
+
+    return {
+        "role": "admin",
+        "admin_tenant": identity["tenant_id"],
+        "admin_user": identity["user_id"],
+        "documents": {
+            "tenant": tenant_docs,
+            "system_total": system_docs,
+        },
+        "requests": {
+            "daily_questions_used": daily_used,
+            "daily_questions_max": daily_max,
+            "daily_questions_remaining": daily_remaining,
+        },
+        "cache": {
+            "hits": int(cache_stats.get("hits", 0)),
+            "misses": int(cache_stats.get("misses", 0)),
+            "hit_rate_pct": round(float(cache_stats.get("hit_rate", 0.0)) * 100, 1),
+        },
+        "reliability": {
+            "degraded_responses": degraded_counts,
+        },
+        "system": {
+            "qdrant": qdrant_status,
+            "embedding_model": model_status,
+            "app_version": get_app_version(),
+        },
     }

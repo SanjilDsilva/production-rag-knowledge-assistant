@@ -13,6 +13,60 @@ export interface DocumentListResponse {
   documents: DocumentItem[];
 }
 
+export interface DocumentStatusCounts {
+  ready: number;
+  failed: number;
+  processing: number;
+  queued: number;
+  total: number;
+}
+
+export interface MemberDashboardResponse {
+  role: 'member';
+  user_id: string;
+  tenant_id: string;
+  personal_documents: {
+    total: number;
+    ready: number;
+    failed: number;
+  };
+  rate_limits: {
+    user_requests_per_minute: number;
+    daily_pool_remaining: number;
+    daily_pool_max: number;
+  };
+}
+
+export interface AdminDashboardResponse {
+  role: 'admin';
+  admin_tenant: string;
+  admin_user: string;
+  documents: {
+    tenant: DocumentStatusCounts;
+    system_total: DocumentStatusCounts;
+  };
+  requests: {
+    daily_questions_used: number;
+    daily_questions_max: number;
+    daily_questions_remaining: number;
+  };
+  cache: {
+    hits: number;
+    misses: number;
+    hit_rate_pct: number;
+  };
+  reliability: {
+    degraded_responses: Record<string, number>;
+  };
+  system: {
+    qdrant: string;
+    embedding_model: string;
+    app_version: string;
+  };
+}
+
+export type DashboardSummaryResponse = MemberDashboardResponse | AdminDashboardResponse;
+
 export interface UploadDocumentResponse {
   document_id: string;
   filename: string;
@@ -124,6 +178,13 @@ class ApiClient {
       { method: 'DELETE' },
       user
     );
+  }
+
+  /**
+   * Fetch live telemetry summary for the Admin Dashboard.
+   */
+  async getDashboardSummary(user: DevUser = 'user-b'): Promise<DashboardSummaryResponse> {
+    return this.request<DashboardSummaryResponse>('/dashboard/summary', { method: 'GET' }, user);
   }
 }
 

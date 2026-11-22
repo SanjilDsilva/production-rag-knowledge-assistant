@@ -40,7 +40,7 @@ export interface QuestionResponse {
   trace?: PipelineTrace | null;
 }
 
-export type DevUser = 'user-a' | 'user-b';
+export type DevUser = 'user-a' | 'user-b' | 'user-c' | 'user-d' | 'user-e' | 'user-f';
 
 export interface RateLimitError {
   isRateLimited: true;

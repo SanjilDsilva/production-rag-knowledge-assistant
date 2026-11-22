@@ -229,10 +229,20 @@ export const DocumentsPage: React.FC<DocumentsPageProps> = ({ currentUser }) => 
                         </span>
                       )}
                       {doc.status === 'failed' && (
-                        <span className="inline-flex items-center space-x-1 text-rose-400 font-medium" title={doc.error_message || ''}>
-                          <span className="h-1.5 w-1.5 rounded-full bg-rose-400"></span>
-                          <span>Failed</span>
-                        </span>
+                        <div className="flex flex-col">
+                          <span className="inline-flex items-center space-x-1 text-rose-400 font-medium">
+                            <span className="h-1.5 w-1.5 rounded-full bg-rose-400"></span>
+                            <span>Failed</span>
+                          </span>
+                          {doc.error_message && (
+                            <span
+                              className="text-[10px] text-rose-300/80 mt-0.5 max-w-[220px] truncate"
+                              title={doc.error_message}
+                            >
+                              {doc.error_message}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="py-3 px-3 font-mono text-[10px] text-slate-400">

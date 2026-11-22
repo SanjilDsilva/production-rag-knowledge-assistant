@@ -1,13 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { Navbar } from './components/Navbar';
+import { OnboardingModal } from './components/OnboardingModal';
 import { AskPage } from './pages/AskPage';
 import { DocumentsPage } from './pages/DocumentsPage';
+import { DashboardPage } from './pages/DashboardPage';
 import { api } from './api/client';
 import { ChatMessage, DevUser, PipelineTrace, RateLimitError } from './types/rag';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<DevUser>('user-a');
+  const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draftQuestion, setDraftQuestion] = useState<string>('');
   const [activeTrace, setActiveTrace] = useState<PipelineTrace | null>(null);
@@ -75,7 +78,18 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
-      <Navbar currentUser={currentUser} onUserChange={setCurrentUser} />
+      <Navbar
+        currentUser={currentUser}
+        onUserChange={setCurrentUser}
+        onOpenOnboarding={() => setIsModalOpen(true)}
+      />
+
+      <OnboardingModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        currentPersona={currentUser}
+        onSelectPersona={setCurrentUser}
+      />
 
       <main className="flex-1">
         <Routes>
@@ -100,10 +114,10 @@ export default function App() {
           <Route
             path="/dashboard"
             element={
-              <div className="mx-auto max-w-4xl px-4 py-12 text-center text-slate-400">
-                <h2 className="text-xl font-bold text-slate-200">Admin Dashboard (Phase 4)</h2>
-                <p className="mt-2 text-sm">Aggregated reliability, latency, and cache metrics.</p>
-              </div>
+              <DashboardPage
+                currentUser={currentUser}
+                onUserChange={setCurrentUser}
+              />
             }
           />
           <Route
