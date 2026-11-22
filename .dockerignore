@@ -12,3 +12,5 @@ tests/
 notebooks/
 scripts/
 docs/
+frontend/node_modules/
+frontend/dist/
