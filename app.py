@@ -14,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
 os.environ.setdefault("APP_ENV", "development")
 os.environ.setdefault("RAG_DEV_IDENTITY_ENABLED", "true")
 os.environ.setdefault("RAG_DATA_DIR", "/tmp/data")
+os.environ["GRADIO_SSR_MODE"] = "False"
 
 import gradio as gr
 import uvicorn
@@ -38,7 +39,7 @@ with gr.Blocks() as demo:
 
 demo.queue()
 
-app = gr.mount_gradio_app(fastapi_app, demo, path="/gradio")
+app = gr.mount_gradio_app(fastapi_app, demo, path="/gradio", ssr_mode=False)
 
 
 def initialize_zerogpu():
