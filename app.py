@@ -21,7 +21,7 @@ import uvicorn
 try:
     import spaces
 
-    @spaces.GPU
+    @spaces.GPU(duration=60)
     def gpu_ready():
         return "ZeroGPU Engine Active"
 except Exception:
@@ -30,13 +30,27 @@ except Exception:
 
 from production_rag.api import app as fastapi_app
 
-# 3. Mount Gradio interface with the @spaces.GPU hook so ZeroGPU allocates hardware
+# 3. Mount Gradio interface with demo.queue() so ZeroGPU registers the GPU worker
 with gr.Blocks() as demo:
     status_text = gr.Textbox(label="Engine Status", value="Online")
     check_button = gr.Button("Ping Engine")
     check_button.click(fn=gpu_ready, outputs=status_text)
 
+demo.queue()
+
 app = gr.mount_gradio_app(fastapi_app, demo, path="/gradio")
+
+
+def initialize_zerogpu():
+    """Explicitly trigger ZeroGPU startup broker registration for FastAPI/ASGI servers."""
+    try:
+        from spaces import zero as _spaces_zero
+
+        if hasattr(_spaces_zero, "startup"):
+            _spaces_zero.startup()
+            print("[ZeroGPU] Startup broker registration sent successfully.")
+    except Exception as error:
+        print(f"[ZeroGPU] Startup registration skipped: {error!r}")
 
 
 def create_listening_socket(host: str, port: int, max_retries: int = 15):
@@ -54,16 +68,12 @@ def create_listening_socket(host: str, port: int, max_retries: int = 15):
             return sock
         except OSError as err:
             print(f"[Startup] Attempt {attempt}/{max_retries} failed to bind {host}:{port}: {err}")
-            try:
-                ps_out = subprocess.check_output(["ps", "-ef"], text=True, stderr=subprocess.STDOUT, timeout=3)
-                print(f"[Startup Diagnostics] Active processes:\n{ps_out}")
-            except Exception:
-                pass
             time.sleep(2)
     raise RuntimeError(f"Could not bind to {host}:{port} after {max_retries} attempts")
 
 
 if __name__ == "__main__":
+    initialize_zerogpu()
     port_str = os.environ.get("PORT") or os.environ.get("GRADIO_SERVER_PORT") or "7860"
     target_port = int(port_str)
     bound_socket = create_listening_socket("0.0.0.0", target_port)
