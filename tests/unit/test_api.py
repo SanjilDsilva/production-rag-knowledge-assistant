@@ -17,12 +17,20 @@ import pytest
 from production_rag import vector_store
 from production_rag.chunking import Chunk
 import logging
+from pathlib import Path
 
 client = TestClient(app)
 
 
 def test_health_endpoint_returns_ok():
     response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_api_prefix_rewriting():
+    response = client.get("/api/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
@@ -102,6 +110,7 @@ def test_production_refuses_development_identity():
     environment = os.environ.copy()
     environment["APP_ENV"] = "production"
     environment["RAG_DEV_IDENTITY_ENABLED"] = "true"
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
 
     result = subprocess.run(
         [sys.executable, "-c", "import production_rag.api"],

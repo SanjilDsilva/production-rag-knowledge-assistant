@@ -308,6 +308,15 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def rewrite_api_prefix(request: Request, call_next):
+    if request.scope["path"] == "/api":
+        request.scope["path"] = "/"
+    elif request.scope["path"].startswith("/api/"):
+        request.scope["path"] = request.scope["path"][4:]
+    return await call_next(request)
+
+
 @app.post("/documents", status_code=202)
 def upload_document(
     background_tasks: BackgroundTasks,
