@@ -8,7 +8,10 @@ from typing import BinaryIO, Literal
 from qdrant_client import QdrantClient
 import shutil
 from tempfile import TemporaryDirectory
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 from production_rag.chunking import CHUNKER_VERSION
 
 from production_rag.indexing import index_document_file
