@@ -749,16 +749,3 @@ else:
     @app.get("/")
     def serve_fallback_root():
         return {"status": "ok", "service": "Enterprise RAG Assistant API"}
-
-
-@app.get("/api/debug-paths")
-def debug_paths():
-    import glob
-    return {
-        "cwd": str(Path.cwd()),
-        "file": str(Path(__file__)),
-        "resolved_file": str(Path(__file__).resolve()),
-        "dist_found": str(FRONTEND_DIST),
-        "app_subdirs": glob.glob("/app/*")[:20],
-        "dist_search": glob.glob("**/dist/**", recursive=True)[:20],
-    }
