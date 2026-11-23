@@ -715,10 +715,29 @@ def get_dashboard_summary(
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
-if FRONTEND_DIST.exists():
+def find_frontend_dist() -> Path | None:
+    candidates = [
+        Path(__file__).resolve().parents[2] / "frontend" / "dist",
+        Path.cwd() / "frontend" / "dist",
+        Path("/app/frontend/dist"),
+        Path("/home/user/app/frontend/dist"),
+        Path(__file__).resolve().parent.parent.parent / "frontend" / "dist",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "index.html").exists():
+            return candidate
+    return None
+
+
+FRONTEND_DIST = find_frontend_dist()
+
+if FRONTEND_DIST is not None:
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/")
+    def serve_root():
+        return FileResponse(FRONTEND_DIST / "index.html")
 
     @app.get("/{full_path:path}")
     def serve_frontend_spa(full_path: str):
@@ -726,3 +745,7 @@ if FRONTEND_DIST.exists():
         if file_path.is_file():
             return FileResponse(file_path)
         return FileResponse(FRONTEND_DIST / "index.html")
+else:
+    @app.get("/")
+    def serve_fallback_root():
+        return {"status": "ok", "service": "Enterprise RAG Assistant API"}
