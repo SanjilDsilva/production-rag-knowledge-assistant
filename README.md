@@ -1,3 +1,14 @@
+---
+title: Enterprise RAG Assistant
+emoji: ⚡
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
+
 # Production RAG Knowledge Assistant
 
 Ask questions about your documents and get answers grounded in those documents, with citations that show where the information came from.
