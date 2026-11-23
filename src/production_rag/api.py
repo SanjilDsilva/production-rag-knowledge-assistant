@@ -16,6 +16,10 @@ from production_rag.chunking import CHUNKER_VERSION
 
 from production_rag.indexing import index_document_file
 from production_rag.vector_store import delete_document_chunks
+from production_rag.semantic_cache import (
+    create_semantic_cache_collection,
+    purge_user_semantic_cache,
+)
 
 from production_rag.vector_store import COLLECTION_NAME, create_collection
 from production_rag.status_store import DocumentStatusStore
@@ -171,6 +175,7 @@ def initialize_app_storage(app: FastAPI) -> None:
     app.state.status_store.reset_processing()
     qdrant_client = create_qdrant_client()
     create_collection(qdrant_client)
+    create_semantic_cache_collection(qdrant_client)
     app.state.qdrant_client = qdrant_client
 
 
@@ -486,6 +491,11 @@ def delete_document(
         document["tenant_id"],
         document["user_id"],
         document_id,
+    )
+    purge_user_semantic_cache(
+        request.app.state.qdrant_client,
+        document["tenant_id"],
+        document["user_id"],
     )
 
     storage.delete(document["storage_key"])

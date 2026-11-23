@@ -34,6 +34,14 @@ export const AskPage: React.FC<AskPageProps> = ({
   activeTrace,
   onSelectTrace,
 }) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!loading && draftQuestion.trim() && countdown == null) {
+        onSubmit(e);
+      }
+    }
+  };
   return (
     <div className="mx-auto max-w-7xl px-4 py-6">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -168,6 +176,7 @@ export const AskPage: React.FC<AskPageProps> = ({
               maxLength={1000}
               value={draftQuestion}
               onChange={(e) => onDraftChange(e.target.value)}
+              onKeyDown={handleKeyDown}
               placeholder="Ask a question about your documents (persists across tabs)..."
               className="w-full rounded-lg border border-slate-700 bg-slate-900 p-2.5 text-xs text-slate-100 placeholder-slate-500 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"
             />

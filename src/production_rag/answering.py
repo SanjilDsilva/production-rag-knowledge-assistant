@@ -31,6 +31,10 @@ from production_rag.providers import (
     generate_with_fallback,
 )
 import time
+from production_rag.semantic_cache import (
+    search_semantic_cache,
+    store_semantic_cache_entry,
+)
 
 SYSTEM_INSTRUCTIONS = (
     "Answer using only the retrieved sources. "
@@ -137,9 +141,7 @@ def build_messages(
     ]
 
 
-CITATION_LABEL_PATTERN = re.compile(
-    r"\[([\d,\s]+)\]|【([\d,\s]+)】"
-)
+CITATION_LABEL_PATTERN = re.compile(r"\[([\d,\s]+)\]|【([\d,\s]+)】")
 
 
 def extract_citation_labels(
@@ -177,10 +179,7 @@ def build_citation_label_map(
     if not prompt_order:
         chunk_ids.sort()
 
-    return {
-        str(number): chunk_id
-        for number, chunk_id in enumerate(chunk_ids, start=1)
-    }
+    return {str(number): chunk_id for number, chunk_id in enumerate(chunk_ids, start=1)}
 
 
 def extract_cited_chunk_ids(answer: str) -> list[str]:
@@ -269,8 +268,7 @@ def build_degraded_answer(
 
     answer = (
         "The AI summary is unavailable right now. Here are the most relevant "
-        "retrieved passages:\n\n"
-        + "\n\n".join(passages)
+        "retrieved passages:\n\n" + "\n\n".join(passages)
     )
     return answer, citations
 
@@ -321,6 +319,69 @@ def answer_question(
             "elapsed_ms": round(embedding_ms, 2),
         },
     )
+
+    model_name = f"{config['models']['primary']}|{config['models']['backup']}"
+    semantic_started_at = time.perf_counter()
+    semantic_hit = search_semantic_cache(
+        client=qdrant_client,
+        query_vector=query_vector,
+        question=question,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        document_set_version=document_set_version,
+        prompt_version=PROMPT_VERSION,
+        model_name=model_name,
+    )
+    semantic_lookup_ms = (time.perf_counter() - semantic_started_at) * 1000
+
+    if semantic_hit is not None:
+        cited_doc_ids = {
+            c.get("document_id") for c in semantic_hit.citations if c.get("document_id")
+        }
+
+        all_ready = not cited_doc_ids or cited_doc_ids.issubset(set(ready_document_ids))
+        if all_ready and request_deadline.remaining_seconds() > 0:
+            cached_citations = [
+                Citation(
+                    chunk_id=str(c.get("chunk_id", "")),
+                    document_name=str(c.get("document_name", "")),
+                    location=str(c.get("location", "")),
+                    text=c.get("text"),
+                )
+                for c in semantic_hit.citations
+            ]
+            log_answer_audit(tenant_id, user_id, list(cited_doc_ids), "answered", True)
+            trace = {
+                "total_ms": round((time.perf_counter() - request_started_at) * 1000, 1),
+                "cache_hit": True,
+                "stages": [
+                    {
+                        "name": "Security Check",
+                        "status": "done",
+                        "duration_ms": 0.1,
+                        "detail": "Passed",
+                    },
+                    {
+                        "name": "Query Embedding",
+                        "status": "done",
+                        "duration_ms": round(embedding_ms, 1),
+                        "detail": "BGE-small-en-v1.5",
+                    },
+                    {
+                        "name": "Semantic Cache",
+                        "status": "hit",
+                        "duration_ms": round(semantic_lookup_ms, 1),
+                        "detail": f"Similarity {semantic_hit.score:.3f}",
+                    },
+                    {
+                        "name": "Citation Check",
+                        "status": "done",
+                        "duration_ms": 0.2,
+                        "detail": f"{len(cached_citations)} citations verified",
+                    },
+                ],
+            }
+            return AnswerResult(semantic_hit.answer, cached_citations, trace=trace)
 
     retrieval_started_at = time.perf_counter()
     retrieved_chunks = search_chunks(
@@ -491,10 +552,7 @@ def answer_question(
             cached_answer, selected_chunks, label_map
         )
         log_answer_stage_timing("citation_validation", citation_started_at)
-        if (
-            cached_citations is not None
-            and request_deadline.remaining_seconds() > 0
-        ):
+        if cached_citations is not None and request_deadline.remaining_seconds() > 0:
             logger.info(
                 "answer_cache_lookup",
                 extra={
@@ -528,11 +586,38 @@ def answer_question(
                 "total_ms": round((time.perf_counter() - request_started_at) * 1000, 1),
                 "cache_hit": True,
                 "stages": [
-                    {"name": "Security Check", "status": "done", "duration_ms": 0.1, "detail": "Passed"},
-                    {"name": "Query Embedding", "status": "done", "duration_ms": round(embedding_ms, 1), "detail": "BGE-small-en-v1.5"},
-                    {"name": "Hybrid Search", "status": "done", "duration_ms": round(retrieval_ms, 1), "detail": f"{len(retrieved_chunks)} chunks"},
-                    {"name": "Answer Cache", "status": "hit", "duration_ms": round(cache_lookup_ms, 1), "detail": "Cache HIT (< 20ms)"},
-                    {"name": "Citation Check", "status": "done", "duration_ms": round((time.perf_counter() - citation_started_at) * 1000, 1), "detail": f"{len(cached_citations)} citations"},
+                    {
+                        "name": "Security Check",
+                        "status": "done",
+                        "duration_ms": 0.1,
+                        "detail": "Passed",
+                    },
+                    {
+                        "name": "Query Embedding",
+                        "status": "done",
+                        "duration_ms": round(embedding_ms, 1),
+                        "detail": "BGE-small-en-v1.5",
+                    },
+                    {
+                        "name": "Hybrid Search",
+                        "status": "done",
+                        "duration_ms": round(retrieval_ms, 1),
+                        "detail": f"{len(retrieved_chunks)} chunks",
+                    },
+                    {
+                        "name": "Answer Cache",
+                        "status": "hit",
+                        "duration_ms": round(cache_lookup_ms, 1),
+                        "detail": "Cache HIT (< 20ms)",
+                    },
+                    {
+                        "name": "Citation Check",
+                        "status": "done",
+                        "duration_ms": round(
+                            (time.perf_counter() - citation_started_at) * 1000, 1
+                        ),
+                        "detail": f"{len(cached_citations)} citations",
+                    },
                 ],
             }
             return AnswerResult(cached_answer, cached_citations, trace=trace)
@@ -673,6 +758,39 @@ def answer_question(
         )
 
     answer_cache.set(cache_key, answer)
+
+    chunk_to_doc = {}
+    for sc in selected_chunks:
+        p = sc.payload or {}
+        if p.get("chunk_id") and p.get("document_id"):
+            chunk_to_doc[p["chunk_id"]] = p["document_id"]
+
+    citations_data = [
+        {
+            "chunk_id": c.chunk_id,
+            "document_name": c.document_name,
+            "document_id": chunk_to_doc.get(c.chunk_id),
+            "location": c.location,
+            "text": c.text,
+        }
+        for c in citations
+    ]
+    try:
+        store_semantic_cache_entry(
+            client=qdrant_client,
+            query_vector=query_vector,
+            question=question,
+            answer=answer,
+            citations=citations_data,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            document_set_version=document_set_version,
+            prompt_version=PROMPT_VERSION,
+            model_name=model_name,
+        )
+    except Exception as exc:
+        logger.warning("Failed to store semantic cache entry: %s", exc)
+
     log_answer_audit(
         tenant_id,
         user_id,
@@ -699,13 +817,51 @@ def answer_question(
         "total_ms": round(total_ms, 1),
         "cache_hit": False,
         "stages": [
-            {"name": "Security Check", "status": "done", "duration_ms": 0.1, "detail": "Passed"},
-            {"name": "Query Embedding", "status": "done", "duration_ms": round(embedding_ms, 1), "detail": "BGE-small-en-v1.5"},
-            {"name": "Hybrid Search (Dense + BM25)", "status": "done", "duration_ms": round(retrieval_ms, 1), "detail": f"{len(retrieved_chunks)} chunks retrieved"},
-            {"name": "Context Budgeting", "status": "done", "duration_ms": round(context_ms, 1), "detail": f"{len(selected_chunks)} chunks kept"},
-            {"name": "Answer Cache", "status": "miss", "duration_ms": round(cache_lookup_ms, 1), "detail": "Cache miss"},
-            {"name": "AI Model Generation", "status": "done", "duration_ms": round(generation_ms, 1), "detail": getattr(provider_result, "model_name", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"},
-            {"name": "Citation Verification", "status": "done", "duration_ms": round(citation_ms, 1), "detail": f"{len(citations)} citations verified"},
+            {
+                "name": "Security Check",
+                "status": "done",
+                "duration_ms": 0.1,
+                "detail": "Passed",
+            },
+            {
+                "name": "Query Embedding",
+                "status": "done",
+                "duration_ms": round(embedding_ms, 1),
+                "detail": "BGE-small-en-v1.5",
+            },
+            {
+                "name": "Hybrid Search (Dense + BM25)",
+                "status": "done",
+                "duration_ms": round(retrieval_ms, 1),
+                "detail": f"{len(retrieved_chunks)} chunks retrieved",
+            },
+            {
+                "name": "Context Budgeting",
+                "status": "done",
+                "duration_ms": round(context_ms, 1),
+                "detail": f"{len(selected_chunks)} chunks kept",
+            },
+            {
+                "name": "Answer Cache",
+                "status": "miss",
+                "duration_ms": round(cache_lookup_ms, 1),
+                "detail": "Cache miss",
+            },
+            {
+                "name": "AI Model Generation",
+                "status": "done",
+                "duration_ms": round(generation_ms, 1),
+                "detail": getattr(
+                    provider_result, "model_name", "gemini-3.1-flash-lite"
+                )
+                or "gemini-3.1-flash-lite",
+            },
+            {
+                "name": "Citation Verification",
+                "status": "done",
+                "duration_ms": round(citation_ms, 1),
+                "detail": f"{len(citations)} citations verified",
+            },
         ],
     }
 
