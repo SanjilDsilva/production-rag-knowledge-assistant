@@ -30,14 +30,19 @@ class SemanticCacheHit:
 
 
 def create_semantic_cache_collection(client: QdrantClient) -> None:
-    if not client.collection_exists(collection_name=SEMANTIC_CACHE_COLLECTION):
-        client.create_collection(
-            collection_name=SEMANTIC_CACHE_COLLECTION,
-            vectors_config=models.VectorParams(
-                size=384,
-                distance=models.Distance.COSINE,
-            ),
-        )
+    if not hasattr(client, "collection_exists"):
+        return
+    try:
+        if not client.collection_exists(collection_name=SEMANTIC_CACHE_COLLECTION):
+            client.create_collection(
+                collection_name=SEMANTIC_CACHE_COLLECTION,
+                vectors_config=models.VectorParams(
+                    size=384,
+                    distance=models.Distance.COSINE,
+                ),
+            )
+    except Exception:
+        pass
 
 
 def search_semantic_cache(
@@ -51,7 +56,12 @@ def search_semantic_cache(
     model_name: str,
     threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
 ) -> SemanticCacheHit | None:
-    if not client.collection_exists(collection_name=SEMANTIC_CACHE_COLLECTION):
+    if not hasattr(client, "collection_exists") or not hasattr(client, "query_points"):
+        return None
+    try:
+        if not client.collection_exists(collection_name=SEMANTIC_CACHE_COLLECTION):
+            return None
+    except Exception:
         return None
 
     query_filter = models.Filter(
@@ -118,33 +128,38 @@ def store_semantic_cache_entry(
     prompt_version: str,
     model_name: str,
 ) -> str:
-    create_semantic_cache_collection(client)
-    point_id = str(uuid4())
-    extracted_ids = list(extract_query_identifiers(question))
+    if not hasattr(client, "upsert"):
+        return ""
+    try:
+        create_semantic_cache_collection(client)
+        point_id = str(uuid4())
+        extracted_ids = list(extract_query_identifiers(question))
 
-    client.upsert(
-        collection_name=SEMANTIC_CACHE_COLLECTION,
-        points=[
-            models.PointStruct(
-                id=point_id,
-                vector=query_vector,
-                payload={
-                    "question": question,
-                    "answer": answer,
-                    "citations": citations,
-                    "tenant_id": tenant_id,
-                    "user_id": user_id,
-                    "document_set_version": document_set_version,
-                    "prompt_version": prompt_version,
-                    "model_name": model_name,
-                    "extracted_ids": extracted_ids,
-                    "created_at": time.time(),
-                },
-            )
-        ],
-        wait=False,
-    )
-    return point_id
+        client.upsert(
+            collection_name=SEMANTIC_CACHE_COLLECTION,
+            points=[
+                models.PointStruct(
+                    id=point_id,
+                    vector=query_vector,
+                    payload={
+                        "question": question,
+                        "answer": answer,
+                        "citations": citations,
+                        "tenant_id": tenant_id,
+                        "user_id": user_id,
+                        "document_set_version": document_set_version,
+                        "prompt_version": prompt_version,
+                        "model_name": model_name,
+                        "extracted_ids": extracted_ids,
+                        "created_at": time.time(),
+                    },
+                )
+            ],
+            wait=False,
+        )
+        return point_id
+    except Exception:
+        return ""
 
 
 def purge_user_semantic_cache(
@@ -152,20 +167,25 @@ def purge_user_semantic_cache(
     tenant_id: str,
     user_id: str,
 ) -> None:
-    if not client.collection_exists(collection_name=SEMANTIC_CACHE_COLLECTION):
+    if not hasattr(client, "delete") or not hasattr(client, "collection_exists"):
         return
-    client.delete(
-        collection_name=SEMANTIC_CACHE_COLLECTION,
-        points_selector=models.FilterSelector(
-            filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="tenant_id", match=models.MatchValue(value=tenant_id)
-                    ),
-                    models.FieldCondition(
-                        key="user_id", match=models.MatchValue(value=user_id)
-                    ),
-                ]
-            )
-        ),
-    )
+    try:
+        if not client.collection_exists(collection_name=SEMANTIC_CACHE_COLLECTION):
+            return
+        client.delete(
+            collection_name=SEMANTIC_CACHE_COLLECTION,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="tenant_id", match=models.MatchValue(value=tenant_id)
+                        ),
+                        models.FieldCondition(
+                            key="user_id", match=models.MatchValue(value=user_id)
+                        ),
+                    ]
+                )
+            ),
+        )
+    except Exception:
+        pass
