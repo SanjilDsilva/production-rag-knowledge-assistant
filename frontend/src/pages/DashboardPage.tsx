@@ -372,7 +372,7 @@ const AdminView: React.FC<{ data: AdminDashboardResponse }> = ({ data }) => {
                 <div className="text-[11px] text-slate-400">Fixed-window per-tenant/per-user quota</div>
               </div>
               <div className="font-mono text-xs font-semibold text-slate-300">
-                2 req / min (429 Retry-After)
+                5 req / min (429 Retry-After)
               </div>
             </div>
           </div>

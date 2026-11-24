@@ -681,7 +681,7 @@ def get_dashboard_summary(
                 "failed": failed_count,
             },
             "rate_limits": {
-                "user_requests_per_minute": 2,
+                "user_requests_per_minute": request.app.state.question_rate_limiter.max_requests,
                 "daily_pool_remaining": daily_remaining,
                 "daily_pool_max": daily_max,
             },

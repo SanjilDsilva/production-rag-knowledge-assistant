@@ -131,7 +131,7 @@ def test_startup_prepares_local_storage_and_status_store(tmp_path, monkeypatch):
         assert api.app.state.status_store.database_path == tmp_path / "app.db"
         assert api.app.state.upload_rate_limiter.max_requests == 5
         assert api.app.state.upload_rate_limiter.window_seconds == 60
-        assert api.app.state.question_rate_limiter.max_requests == 2
+        assert api.app.state.question_rate_limiter.max_requests == 5
         assert api.app.state.global_question_minute_limiter.max_requests == 3
         assert api.app.state.global_question_daily_limiter.max_requests == 100
         assert api.app.state.qdrant_client.collection_exists(
